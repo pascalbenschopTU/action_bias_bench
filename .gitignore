@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+assets/
+out/
+eval_out/
+runs/
+workspace/
+
+benchmarks/skin_tone/generated/
+
+*.pt
+*.pth
+events.out.tfevents.*

@@ -1,0 +1,34 @@
+[data]
+root_dir = ""
+ckpt = ""
+manifests = []
+input_modality = "motion"
+motion_data_source = "zstd"
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "15"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+motion_img_resize = 256
+motion_flow_resize = 128
+motion_resize_mode = "short_side"
+motion_eval_crop_mode = "center"
+motion_eval_num_views = 1
+roi_mode = "none"
+
+[text]
+text_bank_backend = "clip"
+no_clip = true
+rgb_frames = 1
+rgb_sampling = "center"
+rgb_weight = 0.5
+
+[runtime]
+batch_size = 8
+num_workers = 8
+out_dir = "out/skin_tone_eval"
+device = "cuda"

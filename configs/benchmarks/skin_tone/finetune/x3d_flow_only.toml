@@ -1,0 +1,9 @@
+[data]
+motion_data_source = "zstd"
+
+[motion]
+flow_frames = 64
+
+[model]
+model = "x3d"
+active_branch = "second"
