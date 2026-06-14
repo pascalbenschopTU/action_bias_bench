@@ -9,7 +9,7 @@ import random
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -96,7 +96,13 @@ def parse_args() -> argparse.Namespace:
     ev.add_argument("--num_workers", type=int, default=4)
     ev.add_argument("--device", type=str, default="cuda")
     ev.add_argument("--seed", type=int, default=0)
+    ev.add_argument("--pair_tag", type=str, default="")
     ev.add_argument("--summary_only", action="store_true")
+    ev.add_argument("--export_predictions", dest="export_predictions", action="store_true")
+    ev.add_argument("--no_export_predictions", dest="export_predictions", action="store_false")
+    ev.add_argument("--export_clip_stats", dest="export_clip_stats", action="store_true")
+    ev.add_argument("--no_export_clip_stats", dest="export_clip_stats", action="store_false")
+    ev.set_defaults(export_predictions=True, export_clip_stats=True)
 
     ag = subparsers.add_parser("aggregate")
     ag.add_argument("--out_dir", type=str, required=True)
@@ -431,6 +437,38 @@ def macro_weighted(values: np.ndarray, support: np.ndarray) -> Tuple[float, floa
 _DARK_VARIANTS: frozenset = frozenset({"african", "indian"})
 _LIGHT_VARIANTS: frozenset = frozenset({"white", "asian"})
 _VARIANT_RE = re.compile(r"_modified_([^/_]+?)(?:\.mp4|\.avi|\.zst|$)", re.IGNORECASE)
+_BASE_ID_RE = re.compile(
+    r"^(?P<action>.+)_(?P<base_id>\d+)_(?:modified_(?P<variant>[^.]+)|(?P<initial>initial))(?:\..+)?$",
+    re.IGNORECASE,
+)
+_PREDICTIONS_HEADER = [
+    "model",
+    "pair_tag",
+    "seed",
+    "eval_split",
+    "rel_path",
+    "background",
+    "action",
+    "base_id",
+    "variant",
+    "tone_group",
+    "y_true",
+    "y_pred",
+    "correct",
+    "top1_prob",
+    "top2_prob",
+    "margin",
+    "entropy",
+    "true_class_prob",
+    "luma_mean",
+    "luma_std",
+    "saturation_mean",
+    "hue_mean",
+    "contrast",
+    "r_mean",
+    "g_mean",
+    "b_mean",
+]
 
 
 def _extract_variant(path: str) -> str:
@@ -441,6 +479,201 @@ def _extract_variant(path: str) -> str:
     if "_initial." in str(path).lower():
         return "initial"
     return "unknown"
+
+
+def _tone_group_for_variant(variant: str) -> str:
+    variant = str(variant).lower()
+    if variant in _DARK_VARIANTS:
+        return "dark"
+    if variant in _LIGHT_VARIANTS:
+        return "light"
+    if variant == "initial":
+        return "initial"
+    return "unknown"
+
+
+def _safe_rel_path(path: str, root_dir: str) -> str:
+    try:
+        if root_dir:
+            return Path(path).resolve().relative_to(Path(root_dir).resolve()).as_posix()
+    except Exception:
+        pass
+    raw = str(path).replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw.lstrip("/")
+
+
+def _infer_pair_tag_from_out_dir(out_dir: Path) -> str:
+    parts = out_dir.resolve().parts
+    for idx, part in enumerate(parts):
+        if str(part).startswith("seed_") and idx >= 1:
+            return str(parts[idx - 1])
+    return ""
+
+
+def _clip_stats_cache_root(out_dir: Path) -> Path:
+    out_name = out_dir.name
+    if out_name.startswith("eval_") and out_dir.parent != out_dir:
+        return out_dir.parent
+    return out_dir
+
+
+def _load_clip_stats_cache(cache_path: Path) -> Dict[str, Dict[str, float]]:
+    if not cache_path.exists():
+        return {}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    cache: Dict[str, Dict[str, float]] = {}
+    for key, stats in payload.items():
+        if not isinstance(key, str) or not isinstance(stats, dict):
+            continue
+        cleaned: Dict[str, float] = {}
+        for stat_name in (
+            "luma_mean",
+            "luma_std",
+            "saturation_mean",
+            "hue_mean",
+            "contrast",
+            "r_mean",
+            "g_mean",
+            "b_mean",
+        ):
+            value = stats.get(stat_name)
+            if value is None:
+                continue
+            try:
+                cleaned[stat_name] = float(value)
+            except Exception:
+                continue
+        if cleaned:
+            cache[key] = cleaned
+    return cache
+
+
+def _save_clip_stats_cache(cache_path: Path, cache: Dict[str, Dict[str, float]]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _parse_clip_identity(rel_path: str) -> Dict[str, object]:
+    pure = PurePosixPath(str(rel_path))
+    parts = list(pure.parts)
+    background = parts[0] if parts else ""
+    action = ""
+    for idx, part in enumerate(parts):
+        if part == "__generated_synthetic_videos" and idx + 1 < len(parts):
+            action = parts[idx + 1]
+            break
+    if not action and len(parts) >= 2:
+        action = parts[-2]
+
+    variant = _extract_variant(str(rel_path))
+    base_id: int | None = None
+    stem = pure.name
+    for suffix in (".zst", ".npz", ".npy", ".mp4", ".avi", ".mov", ".mkv", ".webm"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    match = _BASE_ID_RE.match(stem)
+    if match:
+        try:
+            base_id = int(match.group("base_id"))
+        except Exception:
+            base_id = None
+        if not action:
+            action = str(match.group("action") or "")
+        parsed_variant = str(match.group("variant") or ("initial" if match.group("initial") else "")).lower()
+        if parsed_variant:
+            variant = parsed_variant
+    tone_group = _tone_group_for_variant(variant)
+    return {
+        "background": str(background),
+        "action": str(action),
+        "base_id": base_id if base_id is not None else "",
+        "variant": str(variant),
+        "tone_group": str(tone_group),
+    }
+
+
+def _compute_clip_rgb_stats(clip_cthw: torch.Tensor) -> Dict[str, float]:
+    x = clip_cthw.to(torch.float32).cpu()
+    if x.numel() == 0 or x.ndim != 4 or x.shape[0] != 3:
+        return {
+            "luma_mean": float("nan"),
+            "luma_std": float("nan"),
+            "saturation_mean": float("nan"),
+            "hue_mean": float("nan"),
+            "contrast": float("nan"),
+            "r_mean": float("nan"),
+            "g_mean": float("nan"),
+            "b_mean": float("nan"),
+        }
+
+    r = x[0]
+    g = x[1]
+    b = x[2]
+    luma = 0.299 * r + 0.587 * g + 0.114 * b
+    luma_mean = float(luma.mean().item())
+    luma_std = float(luma.std(unbiased=False).item())
+
+    flat_luma = luma.flatten()
+    if flat_luma.numel() > 1:
+        q95 = float(torch.quantile(flat_luma, 0.95).item())
+        q05 = float(torch.quantile(flat_luma, 0.05).item())
+        contrast = q95 - q05
+    else:
+        contrast = 0.0
+
+    maxc = torch.maximum(torch.maximum(r, g), b)
+    minc = torch.minimum(torch.minimum(r, g), b)
+    delta = maxc - minc
+    eps = 1e-6
+    saturation = torch.where(maxc > eps, delta / (maxc + eps), torch.zeros_like(maxc))
+    saturation_mean = float(saturation.mean().item())
+
+    hue = torch.zeros_like(maxc)
+    non_zero = delta > eps
+    red_mask = non_zero & (maxc == r)
+    green_mask = non_zero & (maxc == g)
+    blue_mask = non_zero & (maxc == b)
+    hue[red_mask] = torch.remainder((g[red_mask] - b[red_mask]) / (delta[red_mask] + eps), 6.0)
+    hue[green_mask] = ((b[green_mask] - r[green_mask]) / (delta[green_mask] + eps)) + 2.0
+    hue[blue_mask] = ((r[blue_mask] - g[blue_mask]) / (delta[blue_mask] + eps)) + 4.0
+    hue = torch.remainder(hue / 6.0, 1.0)
+    if bool(non_zero.any()):
+        angles = hue[non_zero] * (2.0 * math.pi)
+        sin_mean = float(torch.sin(angles).mean().item())
+        cos_mean = float(torch.cos(angles).mean().item())
+        hue_mean = math.atan2(sin_mean, cos_mean) / (2.0 * math.pi)
+        if hue_mean < 0.0:
+            hue_mean += 1.0
+    else:
+        hue_mean = 0.0
+
+    return {
+        "luma_mean": luma_mean,
+        "luma_std": luma_std,
+        "saturation_mean": saturation_mean,
+        "hue_mean": float(hue_mean),
+        "contrast": float(contrast),
+        "r_mean": float(r.mean().item()),
+        "g_mean": float(g.mean().item()),
+        "b_mean": float(b.mean().item()),
+    }
+
+
+def _write_predictions_csv(rows: List[Dict[str, object]], out_csv: Path) -> None:
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_PREDICTIONS_HEADER)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in _PREDICTIONS_HEADER})
 
 
 def _compute_per_variant_metrics(
@@ -580,26 +813,106 @@ def evaluate_model(
     split_name: str,
     out_dir: Path,
     summary_only: bool,
+    root_dir: str = "",
+    run_seed: int | None = None,
+    pair_tag: str = "",
+    export_predictions: bool = False,
+    export_clip_stats: bool = False,
 ) -> Dict[str, float]:
     model.eval()
-    mode_name = mode_name_for_model(getattr(model, "_benchmark_model_name", "r2plus1d_18"))
+    model_name = str(getattr(model, "_benchmark_model_name", "r2plus1d_18")).lower()
+    mode_name = mode_name_for_model(model_name)
     y_true: List[int] = []
     y_pred: List[int] = []
     all_paths: List[str] = []
+    prediction_rows: List[Dict[str, object]] = []
     top1_correct = 0
     top5_correct = 0
+    resolved_root_dir = str(root_dir).strip()
+    run_pair_tag = str(pair_tag).strip() or _infer_pair_tag_from_out_dir(out_dir)
+
+    clip_stats_cache_path = _clip_stats_cache_root(out_dir) / "clip_stats_cache_rgb.json"
+    clip_stats_cache: Dict[str, Dict[str, float]] = {}
+    clip_stats_cache_dirty = False
+    if export_predictions and export_clip_stats:
+        clip_stats_cache = _load_clip_stats_cache(clip_stats_cache_path)
 
     with torch.no_grad():
         for rgb, _dummy_second, labels, paths in dataloader:
-            rgb = normalize_rgb(rgb.to(device, non_blocking=True), getattr(model, "_benchmark_model_name", "r3d_18"))
+            rgb_for_stats = rgb
+            rgb_model = normalize_rgb(rgb.to(device, non_blocking=True), model_name)
             labels = labels.to(device, non_blocking=True)
-            logits = model(rgb)
+            logits = model(rgb_model)
+            probs = torch.softmax(logits, dim=1)
             preds = logits.argmax(dim=1)
+            topk_probs = probs.topk(k=min(2, probs.shape[1]), dim=1).values
+            top1_probs = topk_probs[:, 0]
+            if probs.shape[1] > 1:
+                top2_probs = topk_probs[:, 1]
+            else:
+                top2_probs = torch.zeros_like(top1_probs)
+            margins = top1_probs - top2_probs
+            entropy = -(probs * torch.log(torch.clamp(probs, min=1e-12))).sum(dim=1)
+            true_class_prob = probs.gather(1, labels.view(-1, 1)).squeeze(1)
+
             top1_correct += int((preds == labels).sum().item())
             top5_correct += topk_correct(logits, labels, 5)
             y_true.extend(labels.detach().cpu().tolist())
             y_pred.extend(preds.detach().cpu().tolist())
             all_paths.extend(list(paths))
+
+            if export_predictions:
+                labels_cpu = labels.detach().cpu().tolist()
+                preds_cpu = preds.detach().cpu().tolist()
+                top1_cpu = top1_probs.detach().cpu().tolist()
+                top2_cpu = top2_probs.detach().cpu().tolist()
+                margin_cpu = margins.detach().cpu().tolist()
+                entropy_cpu = entropy.detach().cpu().tolist()
+                true_prob_cpu = true_class_prob.detach().cpu().tolist()
+
+                for sample_idx, raw_path in enumerate(paths):
+                    rel_path = _safe_rel_path(str(raw_path), resolved_root_dir)
+                    identity = _parse_clip_identity(rel_path)
+                    row: Dict[str, object] = {
+                        "model": model_name,
+                        "pair_tag": run_pair_tag,
+                        "seed": int(run_seed) if run_seed is not None else "",
+                        "eval_split": split_name,
+                        "rel_path": rel_path,
+                        "background": identity["background"],
+                        "action": identity["action"],
+                        "base_id": identity["base_id"],
+                        "variant": identity["variant"],
+                        "tone_group": identity["tone_group"],
+                        "y_true": int(labels_cpu[sample_idx]),
+                        "y_pred": int(preds_cpu[sample_idx]),
+                        "correct": int(int(labels_cpu[sample_idx]) == int(preds_cpu[sample_idx])),
+                        "top1_prob": float(top1_cpu[sample_idx]),
+                        "top2_prob": float(top2_cpu[sample_idx]),
+                        "margin": float(margin_cpu[sample_idx]),
+                        "entropy": float(entropy_cpu[sample_idx]),
+                        "true_class_prob": float(true_prob_cpu[sample_idx]),
+                    }
+                    if export_clip_stats:
+                        cached = clip_stats_cache.get(rel_path)
+                        if cached is None:
+                            cached = _compute_clip_rgb_stats(rgb_for_stats[sample_idx].detach())
+                            clip_stats_cache[rel_path] = cached
+                            clip_stats_cache_dirty = True
+                        row.update(cached)
+                    else:
+                        for stat_name in (
+                            "luma_mean",
+                            "luma_std",
+                            "saturation_mean",
+                            "hue_mean",
+                            "contrast",
+                            "r_mean",
+                            "g_mean",
+                            "b_mean",
+                        ):
+                            row[stat_name] = ""
+                    prediction_rows.append(row)
 
     y_true_np = np.asarray(y_true, dtype=np.int64)
     y_pred_np = np.asarray(y_pred, dtype=np.int64)
@@ -627,6 +940,11 @@ def evaluate_model(
     per_variant_data = _compute_per_variant_metrics(y_true_np, y_pred_np, all_paths, classnames)
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    if export_predictions:
+        predictions_csv = out_dir / f"predictions_rgb_{model_name}.csv"
+        _write_predictions_csv(prediction_rows, predictions_csv)
+    if export_predictions and export_clip_stats and clip_stats_cache_dirty:
+        _save_clip_stats_cache(clip_stats_cache_path, clip_stats_cache)
     if not summary_only:
         (out_dir / f"metrics_{mode_name}.json").write_text(
             json.dumps({"mode": mode_name, "split": split_name, "metrics": metrics}, indent=2),
@@ -662,6 +980,8 @@ def evaluate_loader(
         split_name=split_name,
         out_dir=out_dir,
         summary_only=True,
+        export_predictions=False,
+        export_clip_stats=False,
     )
 
 
@@ -916,6 +1236,11 @@ def evaluate(args: argparse.Namespace) -> None:
         split_name=args.split_name,
         out_dir=Path(args.out_dir),
         summary_only=bool(args.summary_only),
+        root_dir=str(args.root_dir),
+        run_seed=int(args.seed),
+        pair_tag=str(args.pair_tag),
+        export_predictions=bool(args.export_predictions),
+        export_clip_stats=bool(args.export_clip_stats),
     )
     print(json.dumps(metrics, indent=2), flush=True)
 

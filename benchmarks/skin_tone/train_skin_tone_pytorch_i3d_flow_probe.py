@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import json
 import random
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -20,6 +21,11 @@ THIRD_PARTY_ROOT = REPO_ROOT / "third_party" / "pytorch-i3d"
 I3D_MODEL_PATH = THIRD_PARTY_ROOT / "pytorch_i3d.py"
 FLOW_IMAGENET_PATH = THIRD_PARTY_ROOT / "models" / "flow_imagenet.pt"
 MODE_NAME = "flow_i3d_external_model"
+BASE_ID_RE = re.compile(
+    r"^(?P<action>.+)_(?P<base_id>\d+)_(?:modified_(?P<variant>[^.]+)|(?P<initial>initial))(?:\..+)?$",
+    re.IGNORECASE,
+)
+VARIANT_RE = re.compile(r"_modified_([^/_]+?)(?:\.[^.]+|$)", re.IGNORECASE)
 
 
 def load_external_i3d():
@@ -66,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     ev.add_argument("--device", type=str, default="cuda")
     ev.add_argument("--seed", type=int, default=0)
     ev.add_argument("--summary_only", action="store_true")
+    ev.add_argument("--pair_tag", type=str, default="")
 
     ag = subparsers.add_parser("aggregate")
     ag.add_argument("--out_dir", type=str, required=True)
@@ -318,6 +325,99 @@ def save_per_class_csv(classnames: List[str], precision: np.ndarray, recall: np.
             writer.writerow([class_name, int(sup), float(prec), float(rec), float(f1_val), float(acc)])
 
 
+def _safe_rel_path(path: str, root_dir: str) -> str:
+    path_obj = Path(path)
+    root_obj = Path(root_dir)
+    try:
+        return path_obj.resolve().relative_to(root_obj.resolve()).as_posix()
+    except Exception:
+        try:
+            return path_obj.relative_to(root_obj).as_posix()
+        except Exception:
+            return str(path).replace("\\", "/")
+
+
+def _extract_variant(rel_path: str) -> str:
+    rel = str(rel_path)
+    match = VARIANT_RE.search(rel)
+    if match:
+        return str(match.group(1)).lower()
+    if "_initial." in rel.lower():
+        return "initial"
+    return "unknown"
+
+
+def _parse_clip_identity(rel_path: str) -> Dict[str, object]:
+    parts = rel_path.replace("\\", "/").split("/")
+    background = parts[0] if parts else ""
+    action = ""
+    for idx, part in enumerate(parts):
+        if part == "__generated_synthetic_videos" and idx + 1 < len(parts):
+            action = parts[idx + 1]
+            break
+    if not action and len(parts) >= 2:
+        action = parts[-2]
+
+    variant = _extract_variant(rel_path)
+    base_id: int | str = ""
+    stem = Path(rel_path).name
+    for suffix in (".zst", ".npz", ".npy", ".mp4", ".avi", ".mov", ".mkv", ".webm"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    match = BASE_ID_RE.match(stem)
+    if match:
+        if not action:
+            action = str(match.group("action") or "")
+        try:
+            base_id = int(match.group("base_id"))
+        except Exception:
+            base_id = ""
+        parsed_variant = str(match.group("variant") or ("initial" if match.group("initial") else "")).lower()
+        if parsed_variant:
+            variant = parsed_variant
+
+    if variant in {"african", "indian"}:
+        tone_group = "dark"
+    elif variant in {"white", "asian"}:
+        tone_group = "light"
+    elif variant == "initial":
+        tone_group = "initial"
+    else:
+        tone_group = "unknown"
+
+    return {
+        "background": background,
+        "action": action,
+        "base_id": base_id,
+        "variant": variant,
+        "tone_group": tone_group,
+    }
+
+
+def _infer_pair_tag_from_out_dir(out_dir: Path) -> str:
+    parts = [str(part) for part in out_dir.parts]
+    if "flow_i3d_external" in parts:
+        idx = parts.index("flow_i3d_external")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    for idx, part in enumerate(parts):
+        if part.startswith("seed_") and idx > 0:
+            return parts[idx - 1]
+    return ""
+
+
+def _write_predictions_csv(rows: List[Dict[str, object]], path: Path) -> None:
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def build_summary(*, split_name: str, metrics: Dict[str, float]) -> Dict[str, object]:
     return {
         "mode": MODE_NAME,
@@ -388,23 +488,79 @@ def evaluate_model(
     split_name: str,
     out_dir: Path,
     summary_only: bool,
+    root_dir: Path,
+    run_seed: int,
+    pair_tag: str = "",
 ) -> Dict[str, float]:
     model.eval()
     y_true: List[int] = []
     y_pred: List[int] = []
     top1_correct = 0
     top5_correct = 0
+    prediction_rows: List[Dict[str, object]] = []
+    resolved_root_dir = str(root_dir).strip()
+    run_pair_tag = str(pair_tag).strip() or _infer_pair_tag_from_out_dir(out_dir)
 
     with torch.no_grad():
-        for flow, labels, _paths in dataloader:
+        for flow, labels, paths in dataloader:
             flow = flow.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             logits = logits_from_model(model, flow)
+            probs = torch.softmax(logits, dim=1)
             preds = logits.argmax(dim=1)
+            topk_probs = probs.topk(k=min(2, probs.shape[1]), dim=1).values
+            top1_probs = topk_probs[:, 0]
+            if probs.shape[1] > 1:
+                top2_probs = topk_probs[:, 1]
+            else:
+                top2_probs = torch.zeros_like(top1_probs)
+            margins = top1_probs - top2_probs
+            entropy = -(probs * torch.log(torch.clamp(probs, min=1e-12))).sum(dim=1)
+            true_class_prob = probs.gather(1, labels.view(-1, 1)).squeeze(1)
             top1_correct += int((preds == labels).sum().item())
             top5_correct += topk_correct(logits, labels, 5)
             y_true.extend(labels.detach().cpu().tolist())
             y_pred.extend(preds.detach().cpu().tolist())
+            labels_cpu = labels.detach().cpu().tolist()
+            preds_cpu = preds.detach().cpu().tolist()
+            top1_cpu = top1_probs.detach().cpu().tolist()
+            top2_cpu = top2_probs.detach().cpu().tolist()
+            margin_cpu = margins.detach().cpu().tolist()
+            entropy_cpu = entropy.detach().cpu().tolist()
+            true_prob_cpu = true_class_prob.detach().cpu().tolist()
+            for sample_idx, raw_path in enumerate(paths):
+                rel_path = _safe_rel_path(str(raw_path), resolved_root_dir)
+                identity = _parse_clip_identity(rel_path)
+                prediction_rows.append(
+                    {
+                        "model": "i3d_flow",
+                        "pair_tag": run_pair_tag,
+                        "seed": int(run_seed),
+                        "eval_split": split_name,
+                        "rel_path": rel_path,
+                        "background": identity["background"],
+                        "action": identity["action"],
+                        "base_id": identity["base_id"],
+                        "variant": identity["variant"],
+                        "tone_group": identity["tone_group"],
+                        "y_true": int(labels_cpu[sample_idx]),
+                        "y_pred": int(preds_cpu[sample_idx]),
+                        "correct": int(int(labels_cpu[sample_idx]) == int(preds_cpu[sample_idx])),
+                        "top1_prob": float(top1_cpu[sample_idx]),
+                        "top2_prob": float(top2_cpu[sample_idx]),
+                        "margin": float(margin_cpu[sample_idx]),
+                        "entropy": float(entropy_cpu[sample_idx]),
+                        "true_class_prob": float(true_prob_cpu[sample_idx]),
+                        "luma_mean": "",
+                        "luma_std": "",
+                        "saturation_mean": "",
+                        "hue_mean": "",
+                        "contrast": "",
+                        "r_mean": "",
+                        "g_mean": "",
+                        "b_mean": "",
+                    }
+                )
 
     y_true_np = np.asarray(y_true, dtype=np.int64)
     y_pred_np = np.asarray(y_pred, dtype=np.int64)
@@ -430,6 +586,7 @@ def evaluate_model(
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    _write_predictions_csv(prediction_rows, out_dir / f"predictions_{MODE_NAME}.csv")
     if not summary_only:
         (out_dir / f"metrics_{MODE_NAME}.json").write_text(
             json.dumps({"mode": MODE_NAME, "split": split_name, "metrics": metrics}, indent=2),
@@ -585,6 +742,9 @@ def evaluate(args: argparse.Namespace) -> None:
         split_name=args.split_name,
         out_dir=Path(args.out_dir),
         summary_only=bool(args.summary_only),
+        root_dir=Path(args.root_dir),
+        run_seed=int(args.seed),
+        pair_tag=str(args.pair_tag),
     )
     print(json.dumps(metrics, indent=2), flush=True)
 

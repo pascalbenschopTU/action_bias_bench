@@ -622,7 +622,17 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
           for rgb_model in "${RGB_TORCHVISION_MODELS[@]}"; do
             out_dir="${OUT_ROOT}/rgb_torchvision/${rgb_model}/${pair_tag}/seed_${seed}"
             summary_path="$out_dir/summary_rgb_${rgb_model}_model.json"
-            run_already_done "$summary_path" "${#EVAL_SPLITS[@]}" && continue
+            predictions_complete=1
+            for eval_name in "${EVAL_SPLITS[@]}"; do
+              pred_csv="$out_dir/${eval_name}/predictions_rgb_${rgb_model}.csv"
+              if [[ ! -f "$pred_csv" ]]; then
+                predictions_complete=0
+                break
+              fi
+            done
+            if run_already_done "$summary_path" "${#EVAL_SPLITS[@]}" && [[ "$predictions_complete" == "1" ]]; then
+              continue
+            fi
             rgb_batch_size="$(torchvision_batch_size_for_model "$rgb_model")"
 
             resume_ckpt="$(latest_ckpt "$out_dir")"
@@ -660,7 +670,8 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
             eval_ran=0
             for eval_name in "${EVAL_SPLITS[@]}"; do
               split_summary="$out_dir/${eval_name}/summary_rgb_${rgb_model}_model.json"
-              if run_already_done "$split_summary"; then
+              split_pred_csv="$out_dir/${eval_name}/predictions_rgb_${rgb_model}.csv"
+              if run_already_done "$split_summary" && [[ -f "$split_pred_csv" ]]; then
                 continue
               fi
               run_cmd "$PYTHON_BIN" "$ROOT_DIR/scripts/train_torchvision_rgb_probe.py" \
@@ -672,6 +683,7 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
                 --out_dir "$out_dir/${eval_name}" \
                 --split_name "$eval_name" \
                 --model "$rgb_model" \
+                --pair_tag "$pair_tag" \
                 --rgb_frames "$RGB_TORCHVISION_FRAMES" \
                 --img_size "$RGB_TORCHVISION_IMG_SIZE" \
                 --rgb_sampling uniform \
@@ -693,7 +705,17 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
         flow_i3d_external)
           out_dir="${OUT_ROOT}/flow_i3d_external/${pair_tag}/seed_${seed}"
           summary_path="$out_dir/summary_flow_i3d_external_model.json"
-          run_already_done "$summary_path" "${#EVAL_SPLITS[@]}" && continue
+          predictions_complete=1
+          for eval_name in "${EVAL_SPLITS[@]}"; do
+            pred_csv="$out_dir/${eval_name}/predictions_flow_i3d_external_model.csv"
+            if [[ ! -f "$pred_csv" ]]; then
+              predictions_complete=0
+              break
+            fi
+          done
+          if run_already_done "$summary_path" "${#EVAL_SPLITS[@]}" && [[ "$predictions_complete" == "1" ]]; then
+            continue
+          fi
 
           resume_ckpt="$(latest_ckpt "$out_dir")"
           train_cmd=(
@@ -731,7 +753,8 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
           eval_ran=0
           for eval_name in "${EVAL_SPLITS[@]}"; do
             split_summary="$out_dir/${eval_name}/summary_flow_i3d_external_model.json"
-            if run_already_done "$split_summary"; then
+            split_pred_csv="$out_dir/${eval_name}/predictions_flow_i3d_external_model.csv"
+            if run_already_done "$split_summary" && [[ -f "$split_pred_csv" ]]; then
               continue
             fi
             run_cmd "$PYTHON_BIN" "$BENCHMARK_DIR/train_skin_tone_pytorch_i3d_flow_probe.py" \
@@ -742,6 +765,7 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
               --class_id_to_label_csv "$label_csv" \
               --out_dir "$out_dir/${eval_name}" \
               --split_name "$eval_name" \
+              --pair_tag "$pair_tag" \
               --flow_frames "$FLOW_FRAMES" \
               --img_size "$FLOW_IMG_SIZE" \
               --batch_size "$FLOW_BATCH_SIZE" \
