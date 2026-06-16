@@ -5,8 +5,14 @@ import csv
 import json
 import math
 import statistics
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
+
+try:
+    from .schema import RGB_MODEL_COLORS
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import RGB_MODEL_COLORS
 
 
 SPLIT_ORDER = [
@@ -29,14 +35,6 @@ COLOR_BY_MODALITY = {
     "flow_i3d_external": "#e377c2",
     "tc_clip": "#9467bd",
 }
-RGB_MODEL_COLORS = {
-    "mc3_18":      "#1f77b4",
-    "mvit_v2_s":   "#ff7f0e",
-    "r2plus1d_18": "#2ca02c",
-    "r3d_18":      "#d62728",
-    "s3d":         "#9467bd",
-    "swin3d_s":    "#8c564b",
-}
 DISPLAY_NAME_BY_MODALITY = {
     "motion": "motion",
     "rgb": "rgb",
@@ -47,6 +45,24 @@ DISPLAY_NAME_BY_MODALITY = {
 MODALITY_ORDER = ["motion", "rgb", "rgb_r2plus1d", "flow_i3d_external", "tc_clip"]
 GOOD_COLOR = (46, 125, 50)
 BAD_COLOR = (198, 40, 40)
+
+
+@dataclass
+class LoadRowsReport:
+    root: str
+    scanned_summary_files: int = 0
+    accepted_rows: int = 0
+    skipped_parse_failures: List[str] = field(default_factory=list)
+    skipped_mode_mismatches: List[Dict[str, str]] = field(default_factory=list)
+    skipped_duplicate_keys: List[str] = field(default_factory=list)
+
+    @property
+    def skipped_count(self) -> int:
+        return (
+            len(self.skipped_parse_failures)
+            + len(self.skipped_mode_mismatches)
+            + len(self.skipped_duplicate_keys)
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,21 +183,33 @@ def parse_summary_location(root: Path, summary_path: Path) -> tuple[str, str, st
     return modality, experiment_tag, seed_name, eval_split
 
 
-def load_rows(root: Path) -> List[Dict[str, object]]:
+def load_rows_with_report(root: Path) -> tuple[List[Dict[str, object]], LoadRowsReport]:
     rows: List[Dict[str, object]] = []
+    report = LoadRowsReport(root=str(root))
     if not root.exists():
-        return rows
+        return rows, report
 
     seen_keys = set()
     for summary_path in sorted(root.rglob("summary_*.json")):
+        report.scanned_summary_files += 1
         parsed = parse_summary_location(root, summary_path)
         if parsed is None:
+            report.skipped_parse_failures.append(str(summary_path))
             continue
         modality, experiment_tag, seed_name, eval_split = parsed
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         raw_mode = str(summary.get("mode", ""))
         normalized_mode = "rgb_model" if modality == "rgb" and raw_mode == "motion_only" else raw_mode
-        if normalized_mode != expected_mode_for_modality(modality):
+        expected_mode = expected_mode_for_modality(modality)
+        if normalized_mode != expected_mode:
+            report.skipped_mode_mismatches.append(
+                {
+                    "path": str(summary_path),
+                    "modality": str(modality),
+                    "mode": str(normalized_mode),
+                    "expected_mode": str(expected_mode),
+                }
+            )
             continue
         per_variant_splits = summary.get("per_variant_splits", {})
 
@@ -189,6 +217,7 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
             for split_name, metrics in summary.get("splits", {}).items():
                 key = (modality, experiment_tag, seed_name, str(split_name), normalized_mode)
                 if key in seen_keys:
+                    report.skipped_duplicate_keys.append(str(summary_path))
                     continue
                 seen_keys.add(key)
                 row: Dict[str, object] = {
@@ -209,10 +238,12 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
                 if gap is not None:
                     row["group_gap_mean"] = float(gap)
                 rows.append(row)
+                report.accepted_rows += 1
             continue
 
         key = (modality, experiment_tag, seed_name, eval_split, normalized_mode)
         if key in seen_keys:
+            report.skipped_duplicate_keys.append(str(summary_path))
             continue
         seen_keys.add(key)
         row = {
@@ -233,6 +264,12 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
         if gap is not None:
             row["group_gap_mean"] = float(gap)
         rows.append(row)
+        report.accepted_rows += 1
+    return rows, report
+
+
+def load_rows(root: Path) -> List[Dict[str, object]]:
+    rows, _report = load_rows_with_report(root)
     return rows
 
 

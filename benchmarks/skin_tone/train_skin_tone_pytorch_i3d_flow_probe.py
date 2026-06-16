@@ -7,7 +7,7 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +26,23 @@ BASE_ID_RE = re.compile(
     re.IGNORECASE,
 )
 VARIANT_RE = re.compile(r"_modified_([^/_]+?)(?:\.[^.]+|$)", re.IGNORECASE)
+
+
+def flow_summary_filename() -> str:
+    return f"summary_{MODE_NAME}.json"
+
+
+def flow_predictions_filename() -> str:
+    return f"predictions_{MODE_NAME}.csv"
+
+
+def flow_i3d_run_complete(run_dir: Path, eval_splits: Sequence[str]) -> bool:
+    from utils.checkpoints import summary_has_expected_splits
+
+    run_dir = Path(run_dir)
+    if not summary_has_expected_splits(run_dir / flow_summary_filename(), len(eval_splits)):
+        return False
+    return all((run_dir / split / flow_predictions_filename()).is_file() for split in eval_splits)
 
 
 def load_external_i3d():

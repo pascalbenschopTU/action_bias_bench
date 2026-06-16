@@ -923,9 +923,6 @@ def main():
             if args.flow_backend == "raft_large":
                 print("[EVAL] motion_data_source=zstd uses precomputed flow; skipping on-the-fly RAFT.", flush=True)
             args.flow_backend = "farneback"
-            if args.roi_mode != "none":
-                print("[WARN] --roi_mode is ignored when --motion_data_source zstd.", flush=True)
-                args.roi_mode = "none"
         elif args.flow_backend == "raft_large":
             if device.type != "cuda":
                 raise RuntimeError("--flow_backend raft_large requires CUDA for practical runtime.")
@@ -933,8 +930,6 @@ def main():
                 raise ValueError(
                     f"flow_hw must be >=128 and divisible by 8 for raft_large. Got flow_hw={flow_hw}."
                 )
-            if args.roi_mode != "none":
-                raise ValueError("--roi_mode is currently only supported with --flow_backend farneback.")
     else:
         if args.motion_data_source != "video":
             print("[WARN] --motion_data_source is motion-only; forcing to 'video' in rgb mode.", flush=True)
@@ -942,9 +937,6 @@ def main():
         if args.flow_backend != "farneback":
             print("[WARN] flow backend options are motion-only; forcing --flow_backend farneback in rgb mode.", flush=True)
             args.flow_backend = "farneback"
-        if args.roi_mode != "none":
-            print("[WARN] --roi_mode is motion-only; ignored in rgb mode.", flush=True)
-            args.roi_mode = "none"
 
     # ---- farneback params ----
     fb_params = dict(
@@ -1170,17 +1162,10 @@ def main():
                     fb_params=fb_params,
                     flow_max_disp=flow_max_disp,
                     flow_normalize=True,
-                    roi_mode=args.roi_mode,
-                    roi_stride=max(1, int(args.roi_stride)),
-                    motion_roi_threshold=args.motion_roi_threshold,
-                    motion_roi_min_area=int(args.motion_roi_min_area),
                     motion_img_resize=motion_img_resize,
                     motion_flow_resize=motion_flow_resize,
                     motion_crop_mode=motion_eval_crop_mode,
                     num_views=motion_eval_num_views,
-                    yolo_model=args.yolo_model,
-                    yolo_conf=float(args.yolo_conf),
-                    yolo_device=args.yolo_device,
                     out_dtype=torch.float16,
                     dataset_split_txt=manifest_path,
                     class_id_to_label_csv=args.class_id_to_label_csv,

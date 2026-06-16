@@ -9,6 +9,7 @@ out/
 eval_out/
 runs/
 workspace/
+huggingface/
 
 benchmarks/skin_tone/generated/
 

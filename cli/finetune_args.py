@@ -181,13 +181,6 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         choices=["none", "random", "center", "motion"],
         help="Spatial crop mode for evaluation.",
     )
-    motion.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
-    motion.add_argument("--roi_stride", type=int, default=3)
-    motion.add_argument("--motion_roi_threshold", type=float, default=None)
-    motion.add_argument("--motion_roi_min_area", type=int, default=64)
-    motion.add_argument("--yolo_model", type=str, default="yolo11n.pt")
-    motion.add_argument("--yolo_conf", type=float, default=0.25)
-    motion.add_argument("--yolo_device", type=str, default=None)
     motion.add_argument("--rgb_frames", type=int, default=64)
     motion.add_argument(
         "--rgb_sampling",

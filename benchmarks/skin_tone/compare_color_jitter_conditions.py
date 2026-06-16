@@ -13,6 +13,10 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 from aggregate_skin_tone_probe import load_rows
+try:
+    from .schema import stable_seed
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import stable_seed
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mpl_actionbiasbench"))
 
@@ -312,7 +316,10 @@ def build_robustness_rows(root_specs: Sequence[Tuple[str, Path, float]], metric_
                 if not baseline_values:
                     continue
                 diffs = [right - left for left, right in zip(baseline_values, compare_values)]
-                ci_low, ci_high = bootstrap_ci(diffs, seed=hash((model, label, metric_key)) & 0xFFFF)
+                ci_low, ci_high = bootstrap_ci(
+                    diffs,
+                    seed=stable_seed((model, label, metric_key), modulo=2**16),
+                )
                 t_stat, t_p = paired_ttest(compare_values, baseline_values)
                 w_stat, w_p = paired_wilcoxon(compare_values, baseline_values)
                 comparison_rows.append(

@@ -1,7 +1,5 @@
 """On-the-fly motion extraction datasets and helpers."""
 
-import sys
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -12,16 +10,6 @@ from torch.utils.data import Dataset
 from .augment import random_motion_augment
 from utils.manifests import classnames_from_id_csv, list_videos
 from utils.parsing import aligned_indices_from_superset_unique, sample_unique_indices
-
-_DATASET_UTILS_DIR = Path(__file__).resolve().parent.parent / "dataset"
-if str(_DATASET_UTILS_DIR) not in sys.path:
-    sys.path.append(str(_DATASET_UTILS_DIR))
-
-from cropping_util import (
-    crop_frame_by_roi,
-    detect_square_roi_largest_motion,
-    detect_square_roi_yolo_person,
-)
 
 def _sample_motion_crop_anchor(crop_mode: str) -> Optional[Tuple[float, float]]:
     if crop_mode in ("none", "motion"):
@@ -104,7 +92,6 @@ def compute_mhi_and_flow_stream(
     flow_max_disp: float,
     flow_normalize: bool,
     out_dtype=torch.float16,
-    roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
     motion_img_resize: Optional[int] = None,
     motion_flow_resize: Optional[int] = None,
     motion_crop_mode = None,
@@ -167,7 +154,7 @@ def compute_mhi_and_flow_stream(
         if t > last_needed:
             break
 
-        frame_src = crop_frame_by_roi(frame_bgr, roi_xyxy)
+        frame_src = frame_bgr
         frame224 = _resize_and_crop_square(
             frame_src,
             resize_hw=motion_img_resize,
@@ -236,17 +223,10 @@ class VideoMotionDataset(Dataset):
         fb_params: Dict,
         flow_max_disp: float,
         flow_normalize: bool,
-        roi_mode: str = "none",
-        roi_stride: int = 3,
-        motion_roi_threshold: Optional[float] = None,
-        motion_roi_min_area: int = 64,
         motion_img_resize: Optional[int] = None,
         motion_flow_resize: Optional[int] = None,
         motion_crop_mode: str = "none",
         num_views: int = 1,
-        yolo_model: str = "yolo11n.pt",
-        yolo_conf: float = 0.25,
-        yolo_device: Optional[str] = None,
         out_dtype=torch.float16,
         dataset_split_txt=None,
         class_id_to_label_csv=None,
@@ -267,21 +247,10 @@ class VideoMotionDataset(Dataset):
         self.fb_params = fb_params
         self.flow_max_disp = flow_max_disp
         self.flow_normalize = flow_normalize
-        self.roi_mode = str(roi_mode)
-        self.roi_stride = max(1, int(roi_stride))
-        self.motion_roi_threshold = (
-            float(diff_threshold) if motion_roi_threshold is None else float(motion_roi_threshold)
-        )
-        self.motion_roi_min_area = int(motion_roi_min_area)
         self.motion_img_resize = motion_img_resize
         self.motion_flow_resize = motion_flow_resize
         self.motion_crop_mode = motion_crop_mode
         self.num_views = max(1, int(num_views))
-        self.yolo_model = str(yolo_model)
-        self.yolo_conf = float(yolo_conf)
-        self.yolo_device = yolo_device
-        if self.roi_mode not in ("none", "largest_motion", "yolo_person"):
-            raise ValueError(f"Unsupported roi_mode for VideoMotionDataset: {self.roi_mode}")
         self.out_dtype = out_dtype
         self.p_hflip = float(p_hflip)
         self.p_affine = float(p_affine)
@@ -293,35 +262,10 @@ class VideoMotionDataset(Dataset):
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
 
-    def _get_roi_xyxy(self, path: str) -> Optional[Tuple[int, int, int, int]]:
-        if self.roi_mode == "none":
-            return None
-        roi_xyxy = None
-        try:
-            if self.roi_mode == "largest_motion":
-                roi_xyxy = detect_square_roi_largest_motion(
-                    path=path,
-                    threshold=self.motion_roi_threshold,
-                    stride=self.roi_stride,
-                    min_area=self.motion_roi_min_area,
-                )
-            elif self.roi_mode == "yolo_person":
-                roi_xyxy = detect_square_roi_yolo_person(
-                    path=path,
-                    model_name=self.yolo_model,
-                    stride=self.roi_stride,
-                    conf=self.yolo_conf,
-                    device=self.yolo_device,
-                )
-        except Exception:
-            roi_xyxy = None
-        return roi_xyxy
-
     def __getitem__(self, idx):
         path = self.paths[idx]
         y = self.labels[idx]
         try:
-            roi_xyxy = self._get_roi_xyxy(path)
             crop_anchors = _multi_view_motion_crop_anchors(self.motion_crop_mode, self.num_views)
             mhi_views = []
             flow_views = []
@@ -338,7 +282,6 @@ class VideoMotionDataset(Dataset):
                     fb_params=self.fb_params,
                     flow_max_disp=self.flow_max_disp,
                     flow_normalize=self.flow_normalize,
-                    roi_xyxy=roi_xyxy,
                     motion_img_resize=self.motion_img_resize,
                     motion_flow_resize=self.motion_flow_resize,
                     motion_crop_mode=self.motion_crop_mode,

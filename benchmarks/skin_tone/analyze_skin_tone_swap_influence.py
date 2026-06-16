@@ -14,23 +14,17 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 try:
+    from .schema import SPLIT_FAMILY_TO_SPLITS, VARIANT_SWAP, tone_group_for_variant
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import SPLIT_FAMILY_TO_SPLITS, VARIANT_SWAP, tone_group_for_variant
+
+try:
     from scipy import stats as scipy_stats  # type: ignore
 except Exception:  # pragma: no cover
     scipy_stats = None
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mpl_actionbiasbench"))
 
-
-SPLIT_FAMILY_TO_SPLITS: Dict[str, Tuple[str, str]] = {
-    "seen": ("eval_matched_seen_ids", "eval_shifted_seen_ids"),
-    "unseen": ("eval_matched_unseen_ids", "eval_shifted_unseen_ids"),
-}
-VARIANT_SWAP: Dict[str, str] = {
-    "african": "white",
-    "white": "african",
-    "indian": "asian",
-    "asian": "indian",
-}
 FEATURE_COLUMNS: List[str] = [
     "top1_prob",
     "top2_prob",
@@ -177,14 +171,7 @@ def parse_clip_identity(rel_path: str) -> Dict[str, object]:
         parsed_variant = str(match.group("variant") or ("initial" if match.group("initial") else "")).lower()
         if parsed_variant:
             variant = parsed_variant
-    if variant in {"african", "indian"}:
-        tone_group = "dark"
-    elif variant in {"white", "asian"}:
-        tone_group = "light"
-    elif variant == "initial":
-        tone_group = "initial"
-    else:
-        tone_group = "unknown"
+    tone_group = tone_group_for_variant(variant)
     return {
         "background": str(background),
         "action": str(action),

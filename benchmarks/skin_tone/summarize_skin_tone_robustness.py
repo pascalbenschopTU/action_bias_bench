@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 from aggregate_skin_tone_probe import load_rows
+try:
+    from .schema import RGB_MODEL_COLORS
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import RGB_MODEL_COLORS
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,14 +20,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-_RGB_MODEL_COLORS = {
-    "mc3_18":      "#1f77b4",
-    "mvit_v2_s":   "#ff7f0e",
-    "r2plus1d_18": "#2ca02c",
-    "r3d_18":      "#d62728",
-    "s3d":         "#9467bd",
-    "swin3d_s":    "#8c564b",
-}
 _MARKERS = ["o", "s", "^", "D", "v", "p", "h", "*"]
 _PAIR_ORDER = [
     "squat_vs_tie",
@@ -55,7 +51,7 @@ def color_for_modality(modality: str) -> str:
     }
     if modality.startswith("rgb_torchvision:"):
         model_name = modality.split(":", 1)[1]
-        return _RGB_MODEL_COLORS.get(model_name, "#6A717D")
+        return RGB_MODEL_COLORS.get(model_name, "#6A717D")
     return palette.get(modality, "#6A717D")
 
 

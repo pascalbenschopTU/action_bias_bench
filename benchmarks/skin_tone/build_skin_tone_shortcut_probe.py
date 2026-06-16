@@ -10,10 +10,14 @@ from pathlib import Path
 from typing import Iterable
 
 from common import LABELS_ROOT, MANIFESTS_ROOT
+try:
+    from .schema import DARK_VARIANT_ORDER, LIGHT_VARIANT_ORDER
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import DARK_VARIANT_ORDER, LIGHT_VARIANT_ORDER
 
 DEFAULT_BACKGROUNDS = ["autumn_hockey", "konzerthaus", "stadium_01"]
-DEFAULT_DARK_VARIANTS = ["african", "indian"]
-DEFAULT_LIGHT_VARIANTS = ["white", "asian"]
+DEFAULT_DARK_VARIANTS = list(DARK_VARIANT_ORDER)
+DEFAULT_LIGHT_VARIANTS = list(LIGHT_VARIANT_ORDER)
 DEFAULT_TRAIN_IDS = [0, 1, 2, 3, 7, 8]
 DEFAULT_VAL_IDS: list[int] = []
 DEFAULT_SAME_ID_EVAL_IDS = [0, 1, 2, 3, 7, 8]
@@ -46,7 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val_ids", type=str, default=",".join(str(x) for x in DEFAULT_VAL_IDS))
     parser.add_argument("--same_id_eval_ids", type=str, default=",".join(str(x) for x in DEFAULT_SAME_ID_EVAL_IDS))
     parser.add_argument("--disjoint_eval_ids", type=str, default=",".join(str(x) for x in DEFAULT_DISJOINT_EVAL_IDS))
-    parser.add_argument("--train_max_samples_per_class", type=int, default=12)
+    parser.add_argument(
+        "--train_max_samples_per_class",
+        type=int,
+        default=0,
+        help="Cap training samples per class after balancing (0 keeps all balanced samples).",
+    )
     parser.add_argument("--val_max_samples_per_class", type=int, default=6)
     parser.add_argument("--eval_max_samples_per_class", type=int, default=0)
     parser.add_argument("--mix_pct", type=int, default=0,
@@ -270,7 +279,7 @@ def main() -> None:
             "dark_variants": dark_variants,
             "light_variants": light_variants,
             "base_ids": train_ids,
-            "max_samples_per_class": 0,
+            "max_samples_per_class": train_max_samples_per_class,
             "mix_pct": mix_pct,
             "mix_seed": mix_seed,
             "notes": (

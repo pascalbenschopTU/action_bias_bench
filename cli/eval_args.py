@@ -75,24 +75,6 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
     )
     motion.add_argument("--raft_amp", action="store_true", default=True, help="Use AMP for RAFT inference on CUDA.")
     motion.add_argument("--no_raft_amp", action="store_false", dest="raft_amp", help="Disable AMP for RAFT inference.")
-    motion.add_argument(
-        "--roi_mode",
-        type=str,
-        default="none",
-        choices=["none", "largest_motion", "yolo_person"],
-        help="Optional ROI pre-crop mode for VideoMotionDataset",
-    )
-    motion.add_argument("--roi_stride", type=int, default=3, help="Frame stride for ROI prepass")
-    motion.add_argument(
-        "--motion_roi_threshold",
-        type=float,
-        default=None,
-        help="Threshold for largest_motion ROI (default: --diff_threshold)",
-    )
-    motion.add_argument("--motion_roi_min_area", type=int, default=64, help="Min CC area for largest_motion ROI")
-    motion.add_argument("--yolo_model", type=str, default="yolo11n.pt", help="YOLO model name/path (ultralytics)")
-    motion.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO confidence threshold")
-    motion.add_argument("--yolo_device", type=str, default=None, help="YOLO device, e.g. cpu or 0")
     motion.add_argument("--fb_pyr_scale", type=float, default=0.5)
     motion.add_argument("--fb_levels", type=int, default=3)
     motion.add_argument("--fb_winsize", type=int, default=15)

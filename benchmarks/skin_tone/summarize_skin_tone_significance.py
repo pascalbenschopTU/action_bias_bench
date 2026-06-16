@@ -13,6 +13,10 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 from aggregate_skin_tone_probe import load_rows
+try:
+    from .schema import SWAP_LABELS, SWAP_ORDER, stable_seed
+except ImportError:  # pragma: no cover - direct script execution
+    from schema import SWAP_LABELS, SWAP_ORDER, stable_seed
 
 try:
     from scipy import stats as scipy_stats  # type: ignore
@@ -21,19 +25,6 @@ except Exception:  # pragma: no cover
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mpl_actionbiasbench"))
 
-VARIANT_ORDER = ["african", "asian", "indian", "white"]
-SWAP_ORDER: List[Tuple[str, str]] = [
-    ("african", "white"),
-    ("indian", "asian"),
-    ("asian", "indian"),
-    ("white", "african"),
-]
-SWAP_LABELS: List[str] = [
-    "african\n→ white",
-    "indian\n→ asian",
-    "asian\n→ indian",
-    "white\n→ african",
-]
 DEFAULT_JITTER_ROOTS = ("cj0p0", "cj0p4", "cj0p8")
 
 
@@ -272,7 +263,10 @@ def compute_model_significance_rows(metric_roots: Sequence[Tuple[str, Path]], me
                 diffs = [m - s for m, s in zip(matched_values, shifted_values)]
                 t_stat, t_p, _ = paired_ttest(matched_values, shifted_values)
                 w_stat, w_p, _ = paired_wilcoxon(matched_values, shifted_values)
-                ci_low, ci_high = bootstrap_ci(diffs, seed=(hash((condition_label, model, split_family)) & 0xFFFF))
+                ci_low, ci_high = bootstrap_ci(
+                    diffs,
+                    seed=stable_seed((condition_label, model, split_family), modulo=2**16),
+                )
                 rows.append(
                     {
                         "analysis_type": "matched_vs_shifted",
@@ -320,7 +314,10 @@ def compute_model_significance_rows(metric_roots: Sequence[Tuple[str, Path]], me
                     diffs = [b - c for b, c in zip(base_values, comp_values)]
                     t_stat, t_p, _ = paired_ttest(base_values, comp_values)
                     w_stat, w_p, _ = paired_wilcoxon(base_values, comp_values)
-                    ci_low, ci_high = bootstrap_ci(diffs, seed=(hash((first_label, comp_label, model, split_family)) & 0xFFFF))
+                    ci_low, ci_high = bootstrap_ci(
+                        diffs,
+                        seed=stable_seed((first_label, comp_label, model, split_family), modulo=2**16),
+                    )
                     rows.append(
                         {
                             "analysis_type": "condition_drop_comparison",
