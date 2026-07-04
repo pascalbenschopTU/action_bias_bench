@@ -1,24 +1,33 @@
 """
-SSM Frobenius distance analysis from cached embeddings.
+SSM structural-distance analysis from cached embeddings.
 
 For each (action, base_id, background) cell, computes:
-    d_skin   = mean Frobenius distance between SSMs across skin-tone swaps
-               e.g. SSM(lunge_7_african) vs SSM(lunge_7_white)
-    d_action = mean Frobenius distance between SSMs of the paired action
-               e.g. SSM(lunge_7_african) vs SSM(cartwheel_7_african)
+    d_skin   = mean SSM distance across skin-tone swaps
+               e.g. dist(SSM(lunge_7_african), SSM(lunge_7_white))
+    d_action = mean SSM distance to a paired action
+               e.g. dist(SSM(lunge_7_african), SSM(cartwheel_7_african))
 
 Bias signal: d_skin / d_action
     << 1  skin swap barely changes the SSM → structure invariant to skin tone
     ~  1  skin swap changes SSM as much as switching action → problematic
 
+Two independent toggles:
+    --metric {frobenius,rsa}  distance between two SSMs (see frob_dist/rsa_dist)
+    --pairs  {matching,all}   matching = 5 curated action pairs (default, original
+                               behaviour); all = all C(10,2)=45 pairs among the
+                               same 10 actions
+
 No model or GPU needed — runs entirely on cached NPZ files.
 
 Usage (from ActionBiasBench directory):
     python scripts/ssm_frobenius_analysis.py --model dinov2
+    python scripts/ssm_frobenius_analysis.py --model dinov2 --metric rsa
+    python scripts/ssm_frobenius_analysis.py --model dinov2 --pairs all
 """
 
 import argparse
 import csv
+import itertools
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,8 +40,7 @@ ACTION_PAIRS = [
     ("dribble", "golf"),
     ("yawn", "fish"),
 ]
-ALL_ACTIONS  = sorted({a for pair in ACTION_PAIRS for a in pair})
-PAIR_LOOKUP  = {a: b for a, b in ACTION_PAIRS} | {b: a for a, b in ACTION_PAIRS}
+ALL_ACTIONS = sorted({a for pair in ACTION_PAIRS for a in pair})
 
 LIGHT_VARIANTS = ["white", "asian"]
 DARK_VARIANTS  = ["african", "indian"]
@@ -78,8 +86,18 @@ def compute_ssm(seq: np.ndarray, T: int) -> np.ndarray:
 
 
 def frob_dist(A: np.ndarray, B: np.ndarray) -> float:
-    """Frobenius distance between two same-shape matrices."""
+    """Frobenius distance between two same-shape matrices. Sensitive to the
+    absolute similarity level of each SSM, not just its temporal pattern."""
     return float(np.linalg.norm(A - B, "fro"))
+
+
+def rsa_dist(A: np.ndarray, B: np.ndarray) -> float:
+    """1 - Pearson correlation between the two SSMs' off-diagonal entries.
+    Mean-centred and scale-invariant, so it compares temporal *structure*
+    only, ignoring differences in overall similarity level (RSA-style)."""
+    iu = np.triu_indices_from(A, k=1)
+    corr = np.corrcoef(A[iu], B[iu])[0, 1]
+    return float(1.0 - corr)
 
 
 def opposite_variants(variant: str) -> list:
@@ -90,6 +108,16 @@ def skin_group(variant: str) -> str:
     return "light" if variant in LIGHT_VARIANTS else "dark"
 
 
+def build_partner_map(pairs: list) -> dict:
+    """action -> set of partner actions. `pairs` is a list of (a, b) tuples."""
+    partners = defaultdict(set)
+    for a, b in pairs:
+        partners[a].add(b)
+        partners[b].add(a)
+    return partners
+
+DIST_FUNCS = {"frobenius": frob_dist, "rsa": rsa_dist}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model",     default="dinov2")
@@ -97,65 +125,77 @@ def main():
     ap.add_argument("--out_dir",   default="out/bias_analysis")
     ap.add_argument("--T",         type=int, default=64,
                     help="Common number of steps to resample all SSMs to before comparing.")
+    ap.add_argument("--metric", choices=list(DIST_FUNCS), default="frobenius",
+                    help="Distance between two SSMs (default: frobenius, original behaviour).")
+    ap.add_argument("--pairs", choices=["matching", "all"], default="matching",
+                    help="matching = 5 curated pairs (default, original behaviour); "
+                         "all = all C(10,2)=45 pairs among the same 10 actions.")
     args = ap.parse_args()
 
     cache_dir = Path(args.cache_dir) / args.model
     out_dir   = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    dist_fn = DIST_FUNCS[args.metric]
+    pairs = ACTION_PAIRS if args.pairs == "matching" else list(itertools.combinations(ALL_ACTIONS, 2))
+    partner_map = build_partner_map(pairs)
 
     print(f"Loading cached embeddings from {cache_dir} ...", flush=True)
     embeddings = load_cache(cache_dir, args.model)
     print(f"  {len(embeddings)} clips loaded", flush=True)
+    print(f"  metric={args.metric}  pairs={args.pairs} ({len(pairs)} action pairs)", flush=True)
 
     T = args.T
     rows = []
 
     for (action, base_id, variant, bg), seq in embeddings.items():
-        partner = PAIR_LOOKUP.get(action)
-        if partner is None:
+        partners = partner_map.get(action)
+        if not partners:
             continue
 
         ssm_ref = compute_ssm(seq, T)
 
         # --- d_skin: same action, same performer, same bg, opposite skin variants ---
+        # (independent of partner action, so computed once per clip)
         skin_dists = []
         for ov in opposite_variants(variant):
             key = (action, base_id, ov, bg)
             if key not in embeddings:
                 continue
             ssm_other = compute_ssm(embeddings[key], T)
-            skin_dists.append(frob_dist(ssm_ref, ssm_other))
-
-        # --- d_action: partner action, same performer, same bg, all skin variants ---
-        action_dists = []
-        for pv in ALL_VARIANTS:
-            key = (partner, base_id, pv, bg)
-            if key not in embeddings:
-                continue
-            ssm_other = compute_ssm(embeddings[key], T)
-            action_dists.append(frob_dist(ssm_ref, ssm_other))
-
-        if not skin_dists or not action_dists:
+            skin_dists.append(dist_fn(ssm_ref, ssm_other))
+        if not skin_dists:
             continue
+        d_skin = float(np.mean(skin_dists))
 
-        d_skin   = float(np.mean(skin_dists))
-        d_action = float(np.mean(action_dists))
-        r        = d_skin / (d_action + 1e-8)
+        # --- d_action: each partner action, same performer, same bg, all skin variants ---
+        for partner in sorted(partners):
+            action_dists = []
+            for pv in ALL_VARIANTS:
+                key = (partner, base_id, pv, bg)
+                if key not in embeddings:
+                    continue
+                ssm_other = compute_ssm(embeddings[key], T)
+                action_dists.append(dist_fn(ssm_ref, ssm_other))
+            if not action_dists:
+                continue
 
-        rows.append({
-            "action":     action,
-            "partner":    partner,
-            "base_id":    base_id,
-            "variant":    variant,
-            "skin_group": skin_group(variant),
-            "background": bg,
-            "d_skin":     round(d_skin, 5),
-            "d_action":   round(d_action, 5),
-            "r":          round(r, 5),
-        })
+            d_action = float(np.mean(action_dists))
+            r        = d_skin / (d_action + 1e-8)
+
+            rows.append({
+                "action":     action,
+                "partner":    partner,
+                "base_id":    base_id,
+                "variant":    variant,
+                "skin_group": skin_group(variant),
+                "background": bg,
+                "d_skin":     round(d_skin, 5),
+                "d_action":   round(d_action, 5),
+                "r":          round(r, 5),
+            })
 
     # save
-    out_csv = out_dir / f"ssm_frobenius_{args.model}.csv"
+    out_csv = out_dir / f"ssm_{args.metric}_{args.model}.csv"
     if rows:
         with open(out_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -164,7 +204,7 @@ def main():
         print(f"Saved: {out_csv}")
 
     # summary
-    print(f"\n=== SSM Frobenius  r = d_skin / d_action  [{args.model}, T={T}] ===")
+    print(f"\n=== SSM r = d_skin / d_action  [{args.model}, T={T}, metric={args.metric}] ===")
     print("r << 1  skin swap barely changes SSM structure (safe)")
     print("r ~  1  skin swap rivals action change (bias)\n")
 

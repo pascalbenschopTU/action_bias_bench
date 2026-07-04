@@ -142,6 +142,11 @@ class RGBVideoClipDataset(Dataset):
         out_dtype: torch.dtype = torch.float32,
         seed: int = 0,
         color_jitter_prob: float = 0.0,
+        color_jitter_brightness: float = 0.4,
+        color_jitter_contrast: float = 0.4,
+        color_jitter_saturation: float = 0.2,
+        color_jitter_hue: float = 0.1,
+        grayscale_prob: float = 0.0,
         p_hflip: float = 0.0,
         blur_mode: str = "none",
         blur_kernel_size: int = 31,
@@ -163,10 +168,23 @@ class RGBVideoClipDataset(Dataset):
 
         self._color_jitter_prob = float(color_jitter_prob)
         self._p_hflip = float(p_hflip)
+        # Strength defaults reproduce the original augmentation (brightness/contrast
+        # 0.4, saturation 0.2, hue 0.1); override for a stronger-jitter experiment.
         self._color_jitter = (
-            T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
+            T.ColorJitter(
+                brightness=float(color_jitter_brightness),
+                contrast=float(color_jitter_contrast),
+                saturation=float(color_jitter_saturation),
+                hue=float(color_jitter_hue),
+            )
             if self._color_jitter_prob > 0
             else None
+        )
+        self._grayscale_prob = float(grayscale_prob)
+        # Unlike jitter (which perturbs hue/saturation), this removes chroma
+        # entirely for the whole clip — a qualitatively different augmentation.
+        self._grayscale = (
+            T.Grayscale(num_output_channels=3) if self._grayscale_prob > 0 else None
         )
         self._blur_mode = str(blur_mode).lower()
         self._blur_kernel_size = int(blur_kernel_size)
@@ -227,6 +245,9 @@ class RGBVideoClipDataset(Dataset):
             if self._color_jitter is not None and rng.random() < self._color_jitter_prob:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
+            if self._grayscale is not None and rng.random() < self._grayscale_prob:
+                for t_idx in range(rgb.shape[1]):
+                    rgb[:, t_idx] = self._grayscale(rgb[:, t_idx])
             if self._p_hflip > 0 and rng.random() < self._p_hflip:
                 rgb = torch.flip(rgb, dims=(-1,))
             if self._blur is not None:

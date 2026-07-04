@@ -183,3 +183,94 @@ def encode_vjepa2(clip_bgr: np.ndarray, model, processor, device=DEVICE) -> np.n
     temporal = tokens.view(1, T_half, -1, D).mean(dim=2)       # (1, T//2, D)
     emb = F.normalize(temporal.squeeze(0), dim=-1)              # (T//2, D)
     return emb.cpu().float().numpy()
+
+
+# ── TC-CLIP (CLIP ViT-B/16 + temporal context, K400-pretrained) ───────────────
+# Architecture is instantiated directly from the checkpoint; no base CLIP
+# download is needed. The TC-CLIP codebase is imported via sys.path at runtime.
+
+_TC_CLIP_DIR = Path(__file__).resolve().parents[2] / (
+    "appearance_free_cross_domain_action_recognition/tc-clip"
+)
+_TC_CLIP_CKPT = _TC_CLIP_DIR / "pretrained" / "zero_shot_k400_tc_clip.pth"
+_TC_CLIP_FRAMES = 16   # architecture fixed at 16 frames
+
+
+def load_tc_clip():
+    import sys
+    if str(_TC_CLIP_DIR) not in sys.path:
+        sys.path.insert(0, str(_TC_CLIP_DIR))
+
+    # Evict any pip-installed 'clip' package so the tc-clip local fork takes precedence
+    for _key in [k for k in sys.modules if k == "clip" or k.startswith("clip.")]:
+        del sys.modules[_key]
+
+    from clip.vision_transformer_tc import TCVisionTransformer  # noqa: PLC0415
+
+    design_details = {
+        "vision_model":              "TCVisionTransformer",
+        "vision_block":              "TCAttentionBlock",
+        "text_block":                "ResidualAttentionBlock",
+        "use_custom_attention":      True,
+        "context_length":            77,
+        "temporal_length":           _TC_CLIP_FRAMES,
+        "positional_embedding_type": "space",
+        "local_global_bias":         True,
+        "context_token_k":           96,
+        "seed_token_a":              0.3,
+        "tome_r":                    100,
+        "tome_d":                    0,
+        "vision_depth":              0,
+        "language_depth":            1,
+        "vision_ctx":                0,
+        "language_ctx":              0,
+    }
+
+    # Architecture params inferred from checkpoint (ViT-B/16, width=768, 12 layers)
+    image_encoder = TCVisionTransformer(
+        input_resolution=224,
+        patch_size=16,
+        num_frames=_TC_CLIP_FRAMES,
+        width=768,
+        layers=12,
+        heads=12,
+        output_dim=512,
+        design_details=design_details,
+    )
+
+    # Load fine-tuned K400 weights (DDP checkpoint: keys start with "module.image_encoder.")
+    ckpt = torch.load(_TC_CLIP_CKPT, map_location="cpu")
+    sd = ckpt["model"]
+    prefix = "module.image_encoder."
+    vision_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+    image_encoder.load_state_dict(vision_sd, strict=True)
+    image_encoder.eval().to(DEVICE)
+
+    import torchvision.transforms as T
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+        T.CenterCrop(224),
+        T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711]),
+    ])
+    return image_encoder, transform
+
+
+@torch.no_grad()
+def encode_tc_clip(clip_bgr: np.ndarray, model, transform, device=DEVICE) -> np.ndarray:
+    """
+    clip_bgr: (T, H, W, 3) uint8 BGR — full clip, T=16 frames expected.
+    Returns (T, 512) float32 L2-normalised per-frame CLS tokens from the last
+    transformer layer.  All frames are processed jointly (temporal modelling).
+    """
+    from PIL import Image
+    frames_rgb = [Image.fromarray(clip_bgr[t, :, :, ::-1]) for t in range(clip_bgr.shape[0])]
+    clip_tensor = torch.stack([transform(f) for f in frames_rgb])   # (T, 3, 224, 224)
+    clip_tensor = clip_tensor.unsqueeze(0).to(device)               # (1, T, 3, 224, 224)
+
+    # TCVisionTransformer.forward returns (cls_tokens, context_tokens, attn, source)
+    # cls_tokens shape: (n_layer, B, T, output_dim)
+    cls_tokens, _, _, _ = model(clip_tensor, return_layer_num=[11])
+    seq = cls_tokens[-1, 0, :, :]                                   # (T, 512)
+    return F.normalize(seq, dim=-1).cpu().float().numpy()

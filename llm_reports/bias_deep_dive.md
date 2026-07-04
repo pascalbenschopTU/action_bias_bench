@@ -46,3 +46,30 @@ The bias in lunge_7 is a position effect, not a structure effect. DINOv2 preserv
 This is actually a clean story for your paper: foundation model representations are temporally structure-invariant to skin tone (SSM Frobenius r << 1 across all actions), but positional drift in feature space can still cause misclassification for OOD clips where motion is ambiguous. The two effects are separable and the structural one is clearly benign.
 
 The job is still running for the remaining actions (squat, tie, yawn, fish) — once it finishes you can re-run the analysis script to get the full picture.
+
+
+Two things jump out immediately.
+
+1. CLIP is systematically more sensitive than DINOv2
+
+Model	mean r (all)	lunge mean_r
+DINOv2	~0.21	0.07
+CLIP	~0.34	0.21
+CLIP's language supervision makes it encode visual appearance attributes — including skin tone — more strongly into its representations. The SSM structure changes nearly 3× more with skin tone for CLIP than for DINOv2 on lunge.
+
+2. Lunge performer 7 stands out in CLIP
+
+
+id=7:  mean_r=0.51,  max_r=0.73   ← highest by far
+id=1:  mean_r=0.27
+id=6:  mean_r=0.24
+id=0:  mean_r=0.22
+Performer 7 has a mean_r of 0.51 — more than double any other lunge performer. That's the same ID that caused all the classifier failures. And this is in CLIP's SSM structure, which is more directly meaningful for a CLIP-based classifier than for DINOv2.
+
+3. Several cases of r > 1 in CLIP
+
+celebrate (max 1.76), golf (max 1.66), squat (max 1.24) — meaning for specific clips, CLIP's temporal structure changes more with skin tone than the entire action boundary. These didn't cause failures in the probe experiment (which used torchvision RGB models, not CLIP), but for a zero-shot CLIP classifier they would represent genuine structural risk.
+
+The cleaner story emerging
+
+DINOv2's representations are largely skin-tone invariant in structure (r ≈ 0.07–0.30). CLIP's are not (r ≈ 0.19–0.53). Performer 7's lunge is the single case that exceeds r=0.5 even in CLIP, directly connecting the SSM analysis to the classifier failure we found earlier — the same clip, the same performer, confirmed now by two completely independent methods.

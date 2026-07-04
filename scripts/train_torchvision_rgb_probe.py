@@ -75,6 +75,17 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--no_amp", dest="amp", action="store_false")
     train.add_argument("--color_jitter", type=float, default=0.0,
                         help="Probability of applying ColorJitter to RGB frames during training.")
+    train.add_argument("--color_jitter_brightness", type=float, default=0.4,
+                        help="ColorJitter brightness strength (default 0.4 = original augmentation).")
+    train.add_argument("--color_jitter_contrast", type=float, default=0.4,
+                        help="ColorJitter contrast strength (default 0.4 = original augmentation).")
+    train.add_argument("--color_jitter_saturation", type=float, default=0.2,
+                        help="ColorJitter saturation strength (default 0.2 = original augmentation).")
+    train.add_argument("--color_jitter_hue", type=float, default=0.1,
+                        help="ColorJitter hue strength (default 0.1 = original augmentation).")
+    train.add_argument("--grayscale_prob", type=float, default=0.0,
+                        help="Probability of converting a clip to grayscale (3-channel) during training. "
+                             "Independent of --color_jitter; removes chroma entirely rather than perturbing it.")
     train.add_argument("--p_hflip", type=float, default=0.0,
                         help="Probability of applying horizontal flip during RGB training.")
     train.add_argument("--mixup_prob", type=float, default=0.0)
@@ -357,6 +368,11 @@ def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDatas
         rgb_norm="none",
         seed=args.seed,
         color_jitter_prob=getattr(args, "color_jitter", 0.0) if training else 0.0,
+        color_jitter_brightness=getattr(args, "color_jitter_brightness", 0.4),
+        color_jitter_contrast=getattr(args, "color_jitter_contrast", 0.4),
+        color_jitter_saturation=getattr(args, "color_jitter_saturation", 0.2),
+        color_jitter_hue=getattr(args, "color_jitter_hue", 0.1),
+        grayscale_prob=getattr(args, "grayscale_prob", 0.0) if training else 0.0,
         p_hflip=getattr(args, "p_hflip", 0.0) if training else 0.0,
     )
 

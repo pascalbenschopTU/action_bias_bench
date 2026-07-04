@@ -60,7 +60,7 @@ ALL_VARIANTS   = LIGHT_VARIANTS + DARK_VARIANTS
 BACKGROUNDS = ["autumn_hockey", "konzerthaus", "stadium_01"]
 ALL_IDS     = list(range(10))
 
-MODELS = ["clip", "dinov2", "dinov3", "siglip", "eva02", "hiera", "vjepa2"]
+MODELS = ["clip", "dinov2", "dinov3", "siglip", "eva02", "hiera", "vjepa2", "tc_clip"]
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ def init_loader_worker(_worker_id: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Skin-tone bias analysis via embedding distances.")
-    ap.add_argument("--model",        required=True, choices=MODELS)
+    ap.add_argument("--model",        required=True)
     ap.add_argument("--frames",       type=int, default=16,
                     help="Frames to sample per video (-1 = all). For vjepa2 use 64.")
     ap.add_argument("--dataset_root", default="../../datasets/skin_tone_actions/camera_far",
@@ -259,7 +259,7 @@ def embed_all_clips(
         if not uncached:
             continue
 
-        if model_name == "vjepa2":
+        if model_name in {"vjepa2", "tc_clip"}:
             for item in uncached:
                 seq = encode_fn(item["frames"], model, processor, device=device)
                 mean_emb = l2_norm(seq.mean(axis=0))
@@ -400,8 +400,9 @@ def main() -> None:
     )
     hf.DEVICE = device
 
-    load_fn   = getattr(hf, f"load_{args.model}")
-    encode_fn = getattr(hf, f"encode_{args.model}")
+    import models.torchvision_models as tv
+    load_fn   = getattr(hf, f"load_{args.model}", None) or getattr(tv, f"load_{args.model}")
+    encode_fn = getattr(hf, f"encode_{args.model}", None) or getattr(tv, f"encode_{args.model}")
     print(f"Loading {args.model} weights...")
     model_obj, processor = load_fn()
 

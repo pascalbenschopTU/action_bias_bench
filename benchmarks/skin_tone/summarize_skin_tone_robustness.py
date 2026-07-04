@@ -442,27 +442,16 @@ def write_pair_heatmap(root: Path, rows: List[Dict[str, object]], metric_name: s
     if not rows:
         return []
 
-    modality_scores: Dict[str, float] = {}
-    pair_scores: Dict[str, float] = {}
-    for row in rows:
-        modality = str(row["modality"])
-        pair_tag = str(row["pair_tag"])
-        test_drop = float(row.get(f"{metric_name}_drop_testing_videos_mean", float("nan")))
-        train_drop = float(row.get(f"{metric_name}_drop_training_videos_mean", float("nan")))
-        score = max(
-            value for value in (test_drop, train_drop) if value == value
-        ) if any(value == value for value in (test_drop, train_drop)) else float("nan")
-        if score == score:
-            modality_scores[modality] = max(score, modality_scores.get(modality, float("-inf")))
-            pair_scores[pair_tag] = max(score, pair_scores.get(pair_tag, float("-inf")))
-
+    # Order both axes by a fixed canonical key so the heatmap layout is identical
+    # across conditions (e.g. color-jitter sweeps). Using per-condition scores here
+    # would place the same pair/model in different rows/columns per figure.
     modalities = sorted(
         {str(row["modality"]) for row in rows},
-        key=lambda modality: (-modality_scores.get(modality, float("-inf")), modality_sort_key(modality)),
+        key=modality_sort_key,
     )
     pair_tags = sorted(
         {str(row["pair_tag"]) for row in rows},
-        key=lambda pair_tag: (-pair_scores.get(pair_tag, float("-inf")), pair_sort_key(pair_tag)),
+        key=pair_sort_key,
     )
 
     matrices = [

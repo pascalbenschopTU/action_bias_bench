@@ -34,6 +34,15 @@ MODALITIES="${MODALITIES:-${SKIN_TONE_MODALITIES:-motion,rgb,rgb_torchvision,flo
 HEAD_MODES="${SKIN_TONE_HEAD_MODES:-language}"
 MOTION_PRESET="${SKIN_TONE_MOTION_PRESET:-default}"
 RGB_TORCHVISION_MODELS="${SKIN_TONE_RGB_TORCHVISION_MODELS:-r3d_18}"
+COLOR_JITTER="${SKIN_TONE_COLOR_JITTER:-0.8}"
+# ColorJitter strength (defaults reproduce the original augmentation).
+COLOR_JITTER_BRIGHTNESS="${SKIN_TONE_COLOR_JITTER_BRIGHTNESS:-0.4}"
+COLOR_JITTER_CONTRAST="${SKIN_TONE_COLOR_JITTER_CONTRAST:-0.4}"
+COLOR_JITTER_SATURATION="${SKIN_TONE_COLOR_JITTER_SATURATION:-0.2}"
+COLOR_JITTER_HUE="${SKIN_TONE_COLOR_JITTER_HUE:-0.1}"
+# Grayscale probability: independent of color jitter, removes chroma entirely
+# (vs. jitter which perturbs it) for a qualitatively different mitigation test.
+GRAYSCALE_PROB="${SKIN_TONE_GRAYSCALE_PROB:-0.0}"
 
 # ── derived ────────────────────────────────────────────────────────────────────
 if [[ "$MIX_PCT" -gt 0 ]]; then
@@ -152,7 +161,7 @@ for pair_spec in "${_pairs[@]}"; do
             --out_dir "$out_dir" \
             --seed "$seed" \
             --val_subset_seed "$seed" \
-            --color_jitter 0.8 \
+            --color_jitter "$COLOR_JITTER" \
             --pretrained_ckpt "$RGB_PRETRAINED_CKPT"
 
           ckpt="$(latest_ckpt "$out_dir")"
@@ -187,7 +196,12 @@ for pair_spec in "${_pairs[@]}"; do
               --seed "$seed"
               --model "$rgb_model"
               --num_workers 8
-              --color_jitter 0.8
+              --color_jitter "$COLOR_JITTER"
+              --color_jitter_brightness "$COLOR_JITTER_BRIGHTNESS"
+              --color_jitter_contrast "$COLOR_JITTER_CONTRAST"
+              --color_jitter_saturation "$COLOR_JITTER_SATURATION"
+              --color_jitter_hue "$COLOR_JITTER_HUE"
+              --grayscale_prob "$GRAYSCALE_PROB"
             )
             [[ -n "$resume_ckpt" ]] && train_cmd+=(--resume_ckpt "$resume_ckpt")
             "${train_cmd[@]}"
