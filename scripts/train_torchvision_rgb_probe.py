@@ -83,6 +83,11 @@ def parse_args() -> argparse.Namespace:
                         help="ColorJitter saturation strength (default 0.2 = original augmentation).")
     train.add_argument("--color_jitter_hue", type=float, default=0.1,
                         help="ColorJitter hue strength (default 0.1 = original augmentation).")
+    train.add_argument("--color_jitter_consistent", action="store_true", default=False,
+                        help="Sample ColorJitter params once per clip and apply the same draw "
+                             "to every frame, instead of resampling independently per frame "
+                             "(default: off, matching all jitter runs produced before this flag "
+                             "existed -- that default introduces unintended frame-to-frame flicker).")
     train.add_argument("--grayscale_prob", type=float, default=0.0,
                         help="Probability of converting a clip to grayscale (3-channel) during training. "
                              "Independent of --color_jitter; removes chroma entirely rather than perturbing it.")
@@ -372,6 +377,7 @@ def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDatas
         color_jitter_contrast=getattr(args, "color_jitter_contrast", 0.4),
         color_jitter_saturation=getattr(args, "color_jitter_saturation", 0.2),
         color_jitter_hue=getattr(args, "color_jitter_hue", 0.1),
+        color_jitter_consistent=getattr(args, "color_jitter_consistent", False),
         grayscale_prob=getattr(args, "grayscale_prob", 0.0) if training else 0.0,
         p_hflip=getattr(args, "p_hflip", 0.0) if training else 0.0,
     )

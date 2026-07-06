@@ -40,6 +40,10 @@ COLOR_JITTER_BRIGHTNESS="${SKIN_TONE_COLOR_JITTER_BRIGHTNESS:-0.4}"
 COLOR_JITTER_CONTRAST="${SKIN_TONE_COLOR_JITTER_CONTRAST:-0.4}"
 COLOR_JITTER_SATURATION="${SKIN_TONE_COLOR_JITTER_SATURATION:-0.2}"
 COLOR_JITTER_HUE="${SKIN_TONE_COLOR_JITTER_HUE:-0.1}"
+# Default (0) reproduces every jitter run so far: ColorJitter params are
+# resampled independently per frame (unintended flicker). Set to 1 for one
+# consistent draw per clip applied to all its frames -- see data/rgb.py.
+COLOR_JITTER_CONSISTENT="${SKIN_TONE_COLOR_JITTER_CONSISTENT:-0}"
 # Grayscale probability: independent of color jitter, removes chroma entirely
 # (vs. jitter which perturbs it) for a qualitatively different mitigation test.
 GRAYSCALE_PROB="${SKIN_TONE_GRAYSCALE_PROB:-0.0}"
@@ -203,6 +207,7 @@ for pair_spec in "${_pairs[@]}"; do
               --color_jitter_hue "$COLOR_JITTER_HUE"
               --grayscale_prob "$GRAYSCALE_PROB"
             )
+            [[ "$COLOR_JITTER_CONSISTENT" == "1" ]] && train_cmd+=(--color_jitter_consistent)
             [[ -n "$resume_ckpt" ]] && train_cmd+=(--resume_ckpt "$resume_ckpt")
             "${train_cmd[@]}"
 

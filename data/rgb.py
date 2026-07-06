@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 from decord import VideoReader, cpu
 from torch.utils.data import Dataset
 
@@ -146,6 +147,7 @@ class RGBVideoClipDataset(Dataset):
         color_jitter_contrast: float = 0.4,
         color_jitter_saturation: float = 0.2,
         color_jitter_hue: float = 0.1,
+        color_jitter_consistent: bool = False,
         grayscale_prob: float = 0.0,
         p_hflip: float = 0.0,
         blur_mode: str = "none",
@@ -168,8 +170,20 @@ class RGBVideoClipDataset(Dataset):
 
         self._color_jitter_prob = float(color_jitter_prob)
         self._p_hflip = float(p_hflip)
+        self._color_jitter_consistent = bool(color_jitter_consistent)
         # Strength defaults reproduce the original augmentation (brightness/contrast
         # 0.4, saturation 0.2, hue 0.1); override for a stronger-jitter experiment.
+        #
+        # NOTE on color_jitter_consistent: T.ColorJitter.forward() resamples its
+        # random parameters on every call. Applying it in a per-frame loop (the
+        # default, consistent=False) therefore draws an INDEPENDENT color shift
+        # for every frame of a jittered clip -- an unintended frame-to-frame
+        # flicker on top of the intended augmentation. All jitter results
+        # produced before this flag existed used this (default) behaviour.
+        # Setting consistent=True samples the jitter parameters once per clip
+        # (via ColorJitter.get_params) and applies that single draw to every
+        # frame via the functional API, matching what "one coherent color
+        # shift for the whole clip" is normally assumed to mean.
         self._color_jitter = (
             T.ColorJitter(
                 brightness=float(color_jitter_brightness),
@@ -216,6 +230,28 @@ class RGBVideoClipDataset(Dataset):
     def _decode_clip_rgb(self, path: str, idxs: np.ndarray) -> torch.Tensor:
         return decode_clip_rgb(path, idxs, self.img_size)
 
+    def _apply_color_jitter_consistent(self, rgb: torch.Tensor) -> None:
+        """Sample ColorJitter params once and apply the same draw to every
+        frame (in place), instead of resampling per frame."""
+        fn_idx, b, c, s, h = T.ColorJitter.get_params(
+            self._color_jitter.brightness,
+            self._color_jitter.contrast,
+            self._color_jitter.saturation,
+            self._color_jitter.hue,
+        )
+        for t_idx in range(rgb.shape[1]):
+            frame = rgb[:, t_idx]
+            for fn_id in fn_idx:
+                if fn_id == 0 and b is not None:
+                    frame = TF.adjust_brightness(frame, b)
+                elif fn_id == 1 and c is not None:
+                    frame = TF.adjust_contrast(frame, c)
+                elif fn_id == 2 and s is not None:
+                    frame = TF.adjust_saturation(frame, s)
+                elif fn_id == 3 and h is not None:
+                    frame = TF.adjust_hue(frame, h)
+            rgb[:, t_idx] = frame
+
     def _load_item(self, idx: int, *, sample_offset: int = 0):
         path = self.paths[idx]
         label = self.labels[idx]
@@ -241,10 +277,16 @@ class RGBVideoClipDataset(Dataset):
                     rng=rng,
                 )
             rgb = self._decode_clip_rgb(path, idxs)
-            # Apply color jitter per-frame before normalization (rgb is uint8 C,T,H,W)
+            # Apply color jitter per-frame before normalization (rgb is uint8 C,T,H,W).
+            # See _apply_color_jitter_consistent / color_jitter_consistent docstring
+            # above: the default path here resamples jitter params independently
+            # per frame (unintended flicker); consistent=True fixes that.
             if self._color_jitter is not None and rng.random() < self._color_jitter_prob:
-                for t_idx in range(rgb.shape[1]):
-                    rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
+                if self._color_jitter_consistent:
+                    self._apply_color_jitter_consistent(rgb)
+                else:
+                    for t_idx in range(rgb.shape[1]):
+                        rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
             if self._grayscale is not None and rng.random() < self._grayscale_prob:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._grayscale(rgb[:, t_idx])
