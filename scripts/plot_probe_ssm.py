@@ -1,23 +1,48 @@
 """Linear-probe + SSM corroboration figures.
 
 Reads:
-  out/linear_probes/_probe_summary.json            (probe matched/shifted f1, unseen)
+  $PROBE_SUMMARY_PATH (default out/linear_probes/_probe_summary.json)
   out/bias_analysis/ssm_<METRIC>_<model>.csv        (per-clip d_skin, d_action, r)
-Writes:
-  out/linear_probes/_probe_drop_by_model.{pdf,png}
-  out/linear_probes/_probe_vs_ssm.{pdf,png}
-  out/linear_probes/_probe_ssm_by_pair.{pdf,png}
+Writes (prefix overridable via $PROBE_OUT_PREFIX, default out/linear_probes/_probe):
+  {PROBE_OUT_PREFIX}_drop_by_model.{pdf,png}
+  {PROBE_OUT_PREFIX}_vs_ssm.{pdf,png}
+  {PROBE_OUT_PREFIX}_ssm_by_pair.{pdf,png}
 
 Bar charts use Tab10 colours, no hatches.  The scatter plot adds distinct
 marker shapes as a second cue for colorblind accessibility.
 """
 import json
+import os
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Override to point at a different probe summary (e.g. the CV run) and write
+# figures under a different name, without touching the fixed-split defaults.
+PROBE_SUMMARY_PATH = Path(os.environ.get("PROBE_SUMMARY_PATH", "out/linear_probes/_probe_summary.json"))
+OUT_PREFIX = os.environ.get("PROBE_OUT_PREFIX", "out/linear_probes/_probe")
+
+# Font sizes scaled to each figure's own native width, matching the pt-per-
+# inch ratio used in benchmarks/skin_tone/summarize_skin_tone_significance.py
+# (reference: 10.4in wide, title=12.5, label=10.5, tick=10.0, annotation=8.7)
+# so text reads at the same apparent size across figures once each is scaled
+# to a shared column width in the paper.
+_FONT_RATIO_TITLE = 12.5 / 10.4
+_FONT_RATIO_LABEL = 10.5 / 10.4
+_FONT_RATIO_TICK = 10.0 / 10.4
+_FONT_RATIO_ANNOTATION = 8.7 / 10.4
+
+
+def font_sizes(width_in: float) -> dict[str, float]:
+    return {
+        "title": _FONT_RATIO_TITLE * width_in,
+        "label": _FONT_RATIO_LABEL * width_in,
+        "tick": _FONT_RATIO_TICK * width_in,
+        "annotation": _FONT_RATIO_ANNOTATION * width_in,
+    }
 
 # Which ssm_<METRIC>_<model>.csv files to read. "rsa" (1 - correlation between
 # SSM off-diagonals) is scale-invariant and preferred over "frobenius", which
@@ -33,7 +58,8 @@ FAMILY = {
     "tc_clip":     "language+K400",  # CLIP ViT-B/16 adapted for video via K400 training
     "dinov2":      "img-ssl",          # DINOv2: pure SSL, no labels
     "dinov3":      "img-ssl",          # DINOv3: pure SSL, no labels
-    "hiera":       "img-ssl+ImgNet",   # MAE SSL + supervised IN1K fine-tune
+    "hiera":       "img-ssl",          # Hiera-Base: pure SSL, no supervised stage (verified: no classifier head)
+    "hiera_large": "img-ssl",          # Hiera-Large: same family as hiera, larger backbone
     "eva02":       "img-ssl+ImgNet",   # MIM SSL + supervised IN22k fine-tune
     "vjepa2":      "video-ssl",
     "r3d_18":      "K400",
@@ -89,7 +115,7 @@ MODEL_COLOR = {
 }
 
 # ── load probe results ────────────────────────────────────────────────────────
-probe = json.loads(Path("out/linear_probes/_probe_summary.json").read_text())
+probe = json.loads(PROBE_SUMMARY_PATH.read_text())
 
 # matched F1 below this means the probe never learned the task, so its drop
 # (robust-looking or not) is not evidence of anything — flagged in red below.
@@ -97,6 +123,9 @@ MATCHED_FLOOR = 0.75
 
 rows = []
 for m, r in probe.items():
+    if m == "hiera":
+        continue  # superseded by hiera_large, shown below relabeled as "hiera"
+    display_name = "hiera" if m == "hiera_large" else m
     mm = r["eval_matched_unseen_ids"]
     ms = r["eval_shifted_unseen_ids"]
     csv = Path(f"out/bias_analysis/ssm_{METRIC}_{m}.csv")
@@ -105,14 +134,21 @@ for m, r in probe.items():
         d = pd.read_csv(csv)
         # ratio of means (NOT mean of per-row ratios, which explodes when d_action~0)
         ssm_r = d["d_skin"].mean() / d["d_action"].mean()
-    rows.append(dict(model=m, family=FAMILY[m], matched=mm, shifted=ms,
-                     drop=mm - ms, ssm_r=ssm_r, reliable=mm >= MATCHED_FLOOR))
+    # Run-level 95% CI on the unseen drop, if build_probe_summary.py stored it
+    # (present for the CV summary, absent for the old fixed-split one).
+    ci_lo = r.get("drop_unseen_ci_low", np.nan)
+    ci_hi = r.get("drop_unseen_ci_high", np.nan)
+    rows.append(dict(model=display_name, family=FAMILY[m], matched=mm, shifted=ms,
+                     drop=mm - ms, ssm_r=ssm_r, reliable=mm >= MATCHED_FLOOR,
+                     drop_ci_lo=ci_lo, drop_ci_hi=ci_hi))
 # bias = -(shifted − matched): positive = robust, negative = skin-tone sensitive.
 # Sort descending so the least-biased model (vjepa2) is at the top.
 df = pd.DataFrame(rows).sort_values("drop", ascending=True).reset_index(drop=True)
 
 # ── Figure 1: probe drop by model ────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(8, 5))
+fig1_w = 11.5
+f1 = font_sizes(fig1_w)
+fig, ax = plt.subplots(figsize=(fig1_w, 5.8))
 bias = -df["drop"]   # positive = robust (only vjepa2), negative = skin-tone sensitive
 for i, row in df.iterrows():
     ax.barh(
@@ -120,28 +156,48 @@ for i, row in df.iterrows():
         color=FAM_COLOR[row.family],
         edgecolor="white", linewidth=0.5,
     )
+    # Run-level 95% CI as a capless hairline whisker at the bar tip (plotted in
+    # shifted-minus-matched space, so the CI on the drop flips sign). Dark
+    # neutral so it stays visible both over the colored bar and on white.
+    lo, hi = row.get("drop_ci_lo", np.nan), row.get("drop_ci_hi", np.nan)
+    if lo == lo and hi == hi:
+        drop = row["drop"]
+        ax.errorbar(
+            -drop, i,
+            xerr=[[hi - drop], [drop - lo]],
+            fmt="none", ecolor="#2b2b2b", elinewidth=1.1,
+            capsize=0, alpha=0.55, zorder=3,
+        )
 ax.set_yticks(range(len(df)))
-ax.set_yticklabels(df.model)
+ax.set_yticklabels(df.model, fontsize=f1["tick"])
+ax.set_ylabel("Model", fontsize=f1["label"], fontweight="bold")
+ax.tick_params(axis="x", labelsize=f1["tick"])
 ax.invert_yaxis()
 ax.axvline(0, color="black", linewidth=0.8, alpha=0.4)
-ax.set_xlim(bias.min() - 0.15, bias.max() + 0.2)
-ax.set_xlabel("shifted $-$ matched  ($\\Delta$F1)")
-ax.set_title("Effect of a skin-tone shift on linear-probe accuracy")
+ax.set_xlim(bias.min() - 0.22, bias.max() + 0.25)
+ax.set_xlabel("shifted $-$ matched  ($\\Delta$F1)", fontsize=f1["label"])
+ax.set_title("Effect of a skin-tone shift on linear-probe accuracy", fontsize=f1["title"])
 for i, row in df.iterrows():
-    val = -row["drop"]
-    xpos = val + 0.005 if val >= 0 else val - 0.005
-    ha = "left" if val >= 0 else "right"
-    label_color = "#555"
-    ax.text(xpos, i, f"matched F1={row.matched:.2f}", va="center", ha=ha,
-            fontsize=7, color=label_color)
+    # Place the label just past the outer (more negative) end of the whisker so
+    # it never overlaps the CI; fall back to the bar tip if no CI is present.
+    hi = row.get("drop_ci_hi", np.nan)
+    outer = -(hi if hi == hi else row["drop"])
+    ax.text(outer - 0.008, i, f"matched F1={row.matched:.2f}", va="center", ha="right",
+            fontsize=f1["annotation"], color="#555")
 handles = [plt.Rectangle((0, 0), 1, 1, color=FAM_COLOR[f]) for f in FAM_COLOR]
-ax.legend(handles, list(FAM_COLOR.keys()), fontsize=7, loc="lower right")
+ax.legend(handles, list(FAM_COLOR.keys()), fontsize=f1["tick"], loc="lower right")
 plt.tight_layout()
-fig.savefig("out/linear_probes/_probe_drop_by_model.pdf")
-fig.savefig("out/linear_probes/_probe_drop_by_model.png", dpi=150)
+fig.savefig(f"{OUT_PREFIX}_drop_by_model.pdf")
+fig.savefig(f"{OUT_PREFIX}_drop_by_model.png", dpi=150)
 
 # ── Figure 2: probe drop vs SSM ratio ────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(7, 5.5))
+# Font sizes are pinned to the 8.6in ratio (matching the other figures) but
+# the canvas itself is drawn smaller at the same aspect ratio -- that's what
+# makes the fixed-point-size text and markers occupy more of the figure.
+fig2_w = 8.6
+f2 = font_sizes(fig2_w)
+f2["label"] *= 1.2  # axis labels emphasized beyond the base ratio, per request
+fig, ax = plt.subplots(figsize=(6.3, 4.1))
 sub = df.dropna(subset=["ssm_r"])
 dr  = sub["drop"].values
 r   = np.corrcoef(sub.ssm_r.values, dr)[0, 1]
@@ -150,6 +206,17 @@ xs = np.linspace(sub.ssm_r.min(), sub.ssm_r.max(), 50)
 ax.plot(xs, a + b * xs, "--", color="grey", lw=1, zorder=1)
 ax.margins(x=0.06)
 for _, row in sub.iterrows():
+    # Hairline vertical CI: capless, same hue as the marker, low alpha, drawn
+    # under the marker so it recedes rather than competing (drop axis only --
+    # the SSM ratio on x is training-free and has no seed/fold spread).
+    lo, hi = row.get("drop_ci_lo", np.nan), row.get("drop_ci_hi", np.nan)
+    if lo == lo and hi == hi:
+        ax.errorbar(
+            row.ssm_r, row["drop"],
+            yerr=[[row["drop"] - lo], [hi - row["drop"]]],
+            fmt="none", ecolor=FAM_COLOR[row.family], elinewidth=1.3,
+            capsize=0, alpha=0.5, zorder=2,
+        )
     ax.scatter(
         row.ssm_r, row["drop"],
         s=130,
@@ -157,15 +224,16 @@ for _, row in sub.iterrows():
         marker=FAM_MARKER[row.family],
         edgecolor="black", linewidth=1.2, zorder=3,
     )
-    ax.annotate(row.model, (row.ssm_r, row["drop"]), fontsize=9,
+    ax.annotate(row.model, (row.ssm_r, row["drop"]), fontsize=f2["annotation"],
                 xytext=(6, 3), textcoords="offset points")
-ax.set_title(f"SSM corroborates the linear probe\nPearson r = {r:.2f}")
+ax.set_title(f"SSM ratio correlates with linear-probe drop\nPearson r = {r:.2f}", fontsize=f2["title"])
 ax.set_xlabel(
     "SSM ratio  $d_\\mathrm{skin}$ / $d_\\mathrm{action}$"
     "\n(higher = more sensitive to skin tone)",
-    fontsize=10,
+    fontsize=f2["label"],
 )
-ax.set_ylabel("linear-probe skin-tone drop", fontsize=10)
+ax.set_ylabel("linear-probe skin-tone drop", fontsize=f2["label"])
+ax.tick_params(axis="both", labelsize=f2["tick"])
 fams = [f for f in FAM_COLOR if f in set(sub.family)]
 handles = [
     plt.Line2D([], [], marker=FAM_MARKER[f], color="w",
@@ -173,10 +241,10 @@ handles = [
                markersize=9, label=f)
     for f in fams
 ]
-ax.legend(handles=handles, fontsize=8, loc="upper left")
+ax.legend(handles=handles, fontsize=f2["tick"], loc="upper left")
 plt.tight_layout()
-fig.savefig("out/linear_probes/_probe_vs_ssm.pdf")
-fig.savefig("out/linear_probes/_probe_vs_ssm.png", dpi=150)
+fig.savefig(f"{OUT_PREFIX}_vs_ssm.pdf")
+fig.savefig(f"{OUT_PREFIX}_vs_ssm.png", dpi=150)
 
 # ── Figure 3: per-pair SSM ratio, grouped bars (one bar per model per pair) ──
 # Compute ratio of means within each (action pair, model) subset.
@@ -202,7 +270,9 @@ bar_width = 0.13
 offsets   = np.arange(n_models) * bar_width - (n_models - 1) * bar_width / 2
 x_pairs   = np.arange(n_pairs)
 
-fig3, ax3 = plt.subplots(figsize=(13, 5.5))
+fig3_w = 13
+f3 = font_sizes(fig3_w)
+fig3, ax3 = plt.subplots(figsize=(fig3_w, 5.5))
 for mi, m in enumerate(models_ordered):
     vals = pair_model_ratios[m]
     ax3.bar(
@@ -214,19 +284,20 @@ for mi, m in enumerate(models_ordered):
     )
 
 ax3.set_xticks(x_pairs)
-ax3.set_xticklabels(PAIR_LABELS_ORDERED, fontsize=10)
+ax3.set_xticklabels(PAIR_LABELS_ORDERED, fontsize=f3["tick"])
+ax3.tick_params(axis="y", labelsize=f3["tick"])
 ax3.set_ylabel(
     "SSM ratio  $d_\\mathrm{skin}$ / $d_\\mathrm{action}$\n"
     "(higher = more sensitive to skin tone)",
-    fontsize=10,
+    fontsize=f3["label"],
 )
-ax3.set_title("SSM skin-tone sensitivity per action pair", fontsize=13, weight="bold")
-ax3.legend(title="model", fontsize=8, title_fontsize=9, ncol=1,
+ax3.set_title("SSM skin-tone sensitivity per action pair", fontsize=f3["title"], weight="bold")
+ax3.legend(title="model", fontsize=f3["tick"], title_fontsize=f3["label"], ncol=1,
            bbox_to_anchor=(1.01, 1), loc="upper left", borderaxespad=0)
 ax3.grid(axis="y", linestyle="--", alpha=0.25)
 plt.tight_layout()
-fig3.savefig("out/linear_probes/_probe_ssm_by_pair.pdf")
-fig3.savefig("out/linear_probes/_probe_ssm_by_pair.png", dpi=150)
+fig3.savefig(f"{OUT_PREFIX}_ssm_by_pair.pdf")
+fig3.savefig(f"{OUT_PREFIX}_ssm_by_pair.png", dpi=150)
 
 print(df.to_string(index=False))
 print("\nsaved figures to out/linear_probes/")

@@ -14,9 +14,22 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 try:
-    from .schema import SPLIT_FAMILY_TO_SPLITS, VARIANT_SWAP, tone_group_for_variant
+    from .schema import DARK_VARIANT_ORDER, LIGHT_VARIANT_ORDER, SPLIT_FAMILY_TO_SPLITS, tone_group_for_variant
 except ImportError:  # pragma: no cover - direct script execution
-    from schema import SPLIT_FAMILY_TO_SPLITS, VARIANT_SWAP, tone_group_for_variant
+    from schema import DARK_VARIANT_ORDER, LIGHT_VARIANT_ORDER, SPLIT_FAMILY_TO_SPLITS, tone_group_for_variant
+
+# Every matched row's tone group has exactly one *opposite* group in the
+# shifted split (see build_skin_tone_shortcut_probe.py's eval_shifted_* specs,
+# which always swap dark_variants<->light_variants wholesale) -- so the
+# shifted split already contains predictions for *both* colors of that
+# opposite group, not just a single fixed counterpart. Pairing against all of
+# them (below) is what makes all 4 achievable color pairs (african<->white,
+# indian<->white, african<->asian, indian<->asian) available for analysis,
+# not just the 2 that a fixed one-to-one VARIANT_SWAP mapping would give.
+OPPOSITE_GROUP_VARIANTS = {
+    "dark": tuple(LIGHT_VARIANT_ORDER),
+    "light": tuple(DARK_VARIANT_ORDER),
+}
 
 try:
     from scipy import stats as scipy_stats  # type: ignore
@@ -101,8 +114,21 @@ def to_int(value: object, default: int = -1) -> int:
         return int(default)
 
 
+_SEED_FOLD_RE = re.compile(r"^seed_(?P<seed>\d+)(?:fold(?P<fold>\d+))?$")
+
+
+def _parse_seed_fold_dirname(name: str) -> Tuple[str, str]:
+    """Split a "seed_{seed}fold{fold}" (CV) or "seed_{seed}" (non-CV) directory
+    name into (seed, fold). fold is "" for non-CV runs -- there is nothing to
+    dedupe against in that case."""
+    match = _SEED_FOLD_RE.match(name)
+    if not match:
+        return name.replace("seed_", "", 1), ""
+    return match.group("seed"), (match.group("fold") or "")
+
+
 def infer_context_from_prediction_path(root: Path, csv_path: Path) -> Dict[str, str]:
-    context = {"model": "", "pair_tag": "", "seed": "", "eval_split": ""}
+    context = {"model": "", "pair_tag": "", "seed": "", "fold": "", "eval_split": ""}
     try:
         rel_parts = csv_path.relative_to(root).parts
     except Exception:
@@ -115,7 +141,7 @@ def infer_context_from_prediction_path(root: Path, csv_path: Path) -> Dict[str, 
         if idx + 2 < len(rel_parts):
             context["pair_tag"] = rel_parts[idx + 2]
         if idx + 3 < len(rel_parts):
-            context["seed"] = rel_parts[idx + 3].replace("seed_", "", 1)
+            context["seed"], context["fold"] = _parse_seed_fold_dirname(rel_parts[idx + 3])
         if idx + 4 < len(rel_parts):
             context["eval_split"] = rel_parts[idx + 4]
         return context
@@ -125,7 +151,7 @@ def infer_context_from_prediction_path(root: Path, csv_path: Path) -> Dict[str, 
         if idx + 1 < len(rel_parts):
             context["pair_tag"] = rel_parts[idx + 1]
         if idx + 2 < len(rel_parts):
-            context["seed"] = rel_parts[idx + 2].replace("seed_", "", 1)
+            context["seed"], context["fold"] = _parse_seed_fold_dirname(rel_parts[idx + 2])
         if idx + 3 < len(rel_parts):
             context["eval_split"] = rel_parts[idx + 3]
     return context
@@ -193,12 +219,17 @@ def normalize_prediction_row(
     model = str(row.get("model", "") or inferred["model"]).strip()
     pair_tag = str(row.get("pair_tag", "") or inferred["pair_tag"]).strip()
     seed = str(row.get("seed", "") or inferred["seed"]).strip()
+    # fold is CV-fold-only and never present in the per-clip prediction CSV
+    # itself (that CSV only ever logs "seed") -- always taken from the
+    # seed_{seed}fold{fold} directory name. Empty string for non-CV runs.
+    fold = str(inferred["fold"]).strip()
     eval_split = str(row.get("eval_split", "") or inferred["eval_split"]).strip()
 
     normalized: Dict[str, object] = {
         "model": model,
         "pair_tag": pair_tag,
         "seed": seed,
+        "fold": fold,
         "eval_split": eval_split,
         "rel_path": rel_path,
         "background": str(row.get("background", "") or clip_info["background"]),
@@ -254,12 +285,20 @@ def build_pair_rows(
     rows: Sequence[Dict[str, object]],
     split_families: Sequence[str],
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
-    by_run_split: Dict[Tuple[str, str, str, str], List[Dict[str, object]]] = defaultdict(list)
+    # fold is part of the grouping key: seed values (0/1/2) repeat across all 3
+    # CV folds, and without fold here, matched/shifted rows from *different
+    # trained models* (fold0's vs fold2's) for the same clip could be pooled
+    # together and cross-paired below -- silently comparing two different
+    # models' predictions as if they were one matched/shifted pair. This
+    # matters specifically for base_ids 0 and 1, the only IDs evaluated as
+    # "unseen" in two different folds (fold0 and fold2).
+    by_run_split: Dict[Tuple[str, str, str, str, str], List[Dict[str, object]]] = defaultdict(list)
     for row in rows:
         key = (
             str(row.get("model", "")),
             str(row.get("pair_tag", "")),
             str(row.get("seed", "")),
+            str(row.get("fold", "")),
             str(row.get("eval_split", "")),
         )
         by_run_split[key].append(dict(row))
@@ -267,12 +306,12 @@ def build_pair_rows(
     pair_rows: List[Dict[str, object]] = []
     run_reports: List[Dict[str, object]] = []
 
-    run_keys = {(model, pair_tag, seed) for model, pair_tag, seed, _split in by_run_split}
-    for model, pair_tag, seed in sorted(run_keys):
+    run_keys = {(model, pair_tag, seed, fold) for model, pair_tag, seed, fold, _split in by_run_split}
+    for model, pair_tag, seed, fold in sorted(run_keys):
         for split_family in split_families:
             matched_split, shifted_split = SPLIT_FAMILY_TO_SPLITS[split_family]
-            matched_rows = list(by_run_split.get((model, pair_tag, seed, matched_split), []))
-            shifted_rows = list(by_run_split.get((model, pair_tag, seed, shifted_split), []))
+            matched_rows = list(by_run_split.get((model, pair_tag, seed, fold, matched_split), []))
+            shifted_rows = list(by_run_split.get((model, pair_tag, seed, fold, shifted_split), []))
 
             if not matched_rows and not shifted_rows:
                 continue
@@ -306,71 +345,83 @@ def build_pair_rows(
 
             for matched in sorted_matched:
                 matched_variant = str(matched.get("variant", "")).lower()
-                counterpart_variant = VARIANT_SWAP.get(matched_variant)
-                if not counterpart_variant:
+                counterpart_variants = OPPOSITE_GROUP_VARIANTS.get(tone_group_for_variant(matched_variant), ())
+                if not counterpart_variants:
                     missing_mapping_count += 1
                     continue
-                lookup_key = (
-                    str(matched.get("background", "")),
-                    str(matched.get("action", "")),
-                    int(matched.get("base_id", -1)),
-                    counterpart_variant,
-                )
-                candidates = shifted_index.get(lookup_key, [])
-                if not candidates:
+                matched_had_pair = False
+                for counterpart_variant in counterpart_variants:
+                    lookup_key = (
+                        str(matched.get("background", "")),
+                        str(matched.get("action", "")),
+                        int(matched.get("base_id", -1)),
+                        counterpart_variant,
+                    )
+                    # Not popped: the same shifted clip is the legitimate
+                    # "after" observation for more than one matched variant
+                    # (e.g. the "white" shifted clip pairs with both the
+                    # african-matched row and the indian-matched row for the
+                    # same base_id/background/action) -- these are distinct
+                    # comparisons living in different variant_pair columns,
+                    # not double use of one comparison.
+                    candidates = shifted_index.get(lookup_key, [])
+                    if not candidates:
+                        continue
+                    shifted = candidates[0]
+                    matched_had_pair = True
+                    paired_count += 1
+
+                    pair_row: Dict[str, object] = {
+                        "model": model,
+                        "pair_tag": pair_tag,
+                        "seed": seed,
+                        "fold": fold,
+                        "split_family": split_family,
+                        "matched_split": matched_split,
+                        "shifted_split": shifted_split,
+                        "background": matched.get("background", ""),
+                        "action": matched.get("action", ""),
+                        "base_id": int(matched.get("base_id", -1)),
+                        "variant_matched": matched_variant,
+                        "variant_shifted": counterpart_variant,
+                        "variant_pair": canonical_variant_pair(matched_variant, counterpart_variant),
+                        "rel_path_matched": matched.get("rel_path", ""),
+                        "rel_path_shifted": shifted.get("rel_path", ""),
+                        "y_true_matched": int(matched.get("y_true", -1)),
+                        "y_true_shifted": int(shifted.get("y_true", -1)),
+                        "y_pred_matched": int(matched.get("y_pred", -1)),
+                        "y_pred_shifted": int(shifted.get("y_pred", -1)),
+                        "correct_matched": int(matched.get("correct", -1)),
+                        "correct_shifted": int(shifted.get("correct", -1)),
+                    }
+                    pair_row["pred_flip"] = int(pair_row["y_pred_matched"] != pair_row["y_pred_shifted"])
+                    pair_row["correctness_drop"] = int(
+                        int(pair_row["correct_matched"]) == 1 and int(pair_row["correct_shifted"]) == 0
+                    )
+                    true_prob_matched = to_float(matched.get("true_class_prob"))
+                    true_prob_shifted = to_float(shifted.get("true_class_prob"))
+                    pair_row["true_class_prob_drop"] = (
+                        float(true_prob_matched - true_prob_shifted)
+                        if true_prob_matched == true_prob_matched and true_prob_shifted == true_prob_shifted
+                        else float("nan")
+                    )
+
+                    for feature_name in FEATURE_COLUMNS:
+                        matched_value = to_float(matched.get(feature_name))
+                        shifted_value = to_float(shifted.get(feature_name))
+                        pair_row[f"matched_{feature_name}"] = matched_value
+                        pair_row[f"shifted_{feature_name}"] = shifted_value
+                        if matched_value == matched_value and shifted_value == shifted_value:
+                            delta = shifted_value - matched_value
+                            pair_row[f"delta_{feature_name}"] = float(delta)
+                            pair_row[f"abs_delta_{feature_name}"] = float(abs(delta))
+                        else:
+                            pair_row[f"delta_{feature_name}"] = float("nan")
+                            pair_row[f"abs_delta_{feature_name}"] = float("nan")
+
+                    pair_rows.append(pair_row)
+                if not matched_had_pair:
                     missing_counterpart_count += 1
-                    continue
-                shifted = candidates.pop(0)
-                paired_count += 1
-
-                pair_row: Dict[str, object] = {
-                    "model": model,
-                    "pair_tag": pair_tag,
-                    "seed": seed,
-                    "split_family": split_family,
-                    "matched_split": matched_split,
-                    "shifted_split": shifted_split,
-                    "background": matched.get("background", ""),
-                    "action": matched.get("action", ""),
-                    "base_id": int(matched.get("base_id", -1)),
-                    "variant_matched": matched_variant,
-                    "variant_shifted": counterpart_variant,
-                    "variant_pair": canonical_variant_pair(matched_variant, counterpart_variant),
-                    "rel_path_matched": matched.get("rel_path", ""),
-                    "rel_path_shifted": shifted.get("rel_path", ""),
-                    "y_true_matched": int(matched.get("y_true", -1)),
-                    "y_true_shifted": int(shifted.get("y_true", -1)),
-                    "y_pred_matched": int(matched.get("y_pred", -1)),
-                    "y_pred_shifted": int(shifted.get("y_pred", -1)),
-                    "correct_matched": int(matched.get("correct", -1)),
-                    "correct_shifted": int(shifted.get("correct", -1)),
-                }
-                pair_row["pred_flip"] = int(pair_row["y_pred_matched"] != pair_row["y_pred_shifted"])
-                pair_row["correctness_drop"] = int(
-                    int(pair_row["correct_matched"]) == 1 and int(pair_row["correct_shifted"]) == 0
-                )
-                true_prob_matched = to_float(matched.get("true_class_prob"))
-                true_prob_shifted = to_float(shifted.get("true_class_prob"))
-                pair_row["true_class_prob_drop"] = (
-                    float(true_prob_matched - true_prob_shifted)
-                    if true_prob_matched == true_prob_matched and true_prob_shifted == true_prob_shifted
-                    else float("nan")
-                )
-
-                for feature_name in FEATURE_COLUMNS:
-                    matched_value = to_float(matched.get(feature_name))
-                    shifted_value = to_float(shifted.get(feature_name))
-                    pair_row[f"matched_{feature_name}"] = matched_value
-                    pair_row[f"shifted_{feature_name}"] = shifted_value
-                    if matched_value == matched_value and shifted_value == shifted_value:
-                        delta = shifted_value - matched_value
-                        pair_row[f"delta_{feature_name}"] = float(delta)
-                        pair_row[f"abs_delta_{feature_name}"] = float(abs(delta))
-                    else:
-                        pair_row[f"delta_{feature_name}"] = float("nan")
-                        pair_row[f"abs_delta_{feature_name}"] = float("nan")
-
-                pair_rows.append(pair_row)
 
             unused_shifted = int(sum(len(values) for values in shifted_index.values()))
             run_reports.append(
@@ -378,6 +429,7 @@ def build_pair_rows(
                     "model": model,
                     "pair_tag": pair_tag,
                     "seed": seed,
+                    "fold": fold,
                     "split_family": split_family,
                     "matched_split": matched_split,
                     "shifted_split": shifted_split,
@@ -566,6 +618,7 @@ def write_pair_level_csv(path: Path, rows: Sequence[Dict[str, object]]) -> None:
         "model",
         "pair_tag",
         "seed",
+        "fold",
         "split_family",
         "matched_split",
         "shifted_split",

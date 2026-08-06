@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -42,6 +43,25 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Font sizes scaled to this figure's own native width, matching the pt-per-
+# inch ratio used in benchmarks/skin_tone/summarize_skin_tone_significance.py
+# (reference: 10.4in wide, title=12.5, label=10.5, tick=10.0, annotation=8.7)
+# so text reads at the same apparent size across figures once each is scaled
+# to a shared column width in the paper.
+_FONT_RATIO_TITLE = 12.5 / 10.4
+_FONT_RATIO_LABEL = 10.5 / 10.4
+_FONT_RATIO_TICK = 10.0 / 10.4
+_FONT_RATIO_ANNOTATION = 8.7 / 10.4
+
+
+def font_sizes(width_in: float) -> dict[str, float]:
+    return {
+        "title": _FONT_RATIO_TITLE * width_in,
+        "label": _FONT_RATIO_LABEL * width_in,
+        "tick": _FONT_RATIO_TICK * width_in,
+        "annotation": _FONT_RATIO_ANNOTATION * width_in,
+    }
 
 MODELS = ["mc3_18", "mvit_v2_s", "r2plus1d_18", "r3d_18", "s3d", "swin3d_s"]
 
@@ -71,20 +91,33 @@ GRID, BASELINE_C = "#e1e0d9", "#c3c2b7"
 MATCHED, SHIFTED = "eval_matched_unseen_ids", "eval_shifted_unseen_ids"
 
 
+SEED_RE = re.compile(r"^seed_(\d+)")
+
+
 def unit_drops(root: Path, model: str) -> dict[tuple[str, str], float]:
-    drops: dict[tuple[str, str], float] = {}
+    """(pair_tag, seed_N) -> matched-shifted F1 drop.
+
+    CV runs name their directories seed_{N}fold{M}; the fold suffix is
+    stripped and folds are averaged into the seed, so CV and non-CV roots
+    key on the same (pair_tag, seed_N) units and can share a unit-intersection
+    with plain-seed (leaky-split) roots.
+    """
+    accum: dict[tuple[str, str], list[float]] = defaultdict(list)
     base = root / "rgb_torchvision" / model
     for summary in sorted(base.glob(f"*/seed_*/summary_rgb_{model}_model.json")):
         pair_tag, seed_dir = summary.parent.parent.name, summary.parent.name
+        match = SEED_RE.match(seed_dir)
+        if not match:
+            continue
+        seed_key = f"seed_{match.group(1)}"
         d = json.loads(summary.read_text())
         splits = d.get("splits", {})
         try:
-            drops[(pair_tag, seed_dir)] = (
-                float(splits[MATCHED]["f1_macro"]) - float(splits[SHIFTED]["f1_macro"])
-            )
+            value = float(splits[MATCHED]["f1_macro"]) - float(splits[SHIFTED]["f1_macro"])
         except KeyError:
             continue
-    return drops
+        accum[(pair_tag, seed_key)].append(value)
+    return {key: float(np.mean(values)) for key, values in accum.items()}
 
 
 def main() -> None:
@@ -92,6 +125,7 @@ def main() -> None:
     ap.add_argument("--roots", nargs="+", required=True)
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--out_dir", type=Path, required=True)
+    ap.add_argument("--out_name", default="augmentation_radar_delta")
     args = ap.parse_args()
 
     conditions: list[tuple[str, Path]] = []
@@ -132,7 +166,12 @@ def main() -> None:
     offset = max(0.03, -dmin * 1.3)
     r_max = offset + dmax * 1.25
 
-    fig = plt.figure(figsize=(8.6, 7.2))
+    # Font sizes are pinned to the 8.6in ratio (matching the other figures)
+    # but the canvas itself is drawn smaller at the same aspect ratio -- that
+    # makes the fixed-point-size text and markers occupy more of the figure.
+    fig_w = 8.6
+    fonts = font_sizes(fig_w)
+    fig = plt.figure(figsize=(6.3, 5.3))
     fig.patch.set_facecolor("white")
     ax = fig.add_subplot(111, projection="polar")
     ax.set_facecolor("white")
@@ -146,11 +185,11 @@ def main() -> None:
     d_ticks = [d for d in (-0.02, 0.0, 0.02, 0.04, 0.06) if 0 < offset + d < r_max]
     ax.set_yticks([offset + d for d in d_ticks])
     ax.set_yticklabels([("0" if d == 0 else f"{d:+.2f}") for d in d_ticks],
-                       fontsize=7.5, color=INK_MUTED)
+                       fontsize=fonts["tick"], color=INK_MUTED)
     ax.set_rlabel_position(90 / n)
     ax.set_xticks(theta)
     xtick_labels = [("none\n(reference)" if l == baseline_label else l) for l in labels]
-    ax.set_xticklabels(xtick_labels, fontsize=9, color=INK_2)
+    ax.set_xticklabels(xtick_labels, fontsize=fonts["tick"], color=INK_2)
 
     # shared reference circle
     tt = np.linspace(0, 2 * np.pi, 200)
@@ -169,16 +208,16 @@ def main() -> None:
     handles.append(plt.Line2D([], [], color=INK_2, lw=2.4,
                               label="no augmentation (Δ = 0)"))
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.02, 1.05),
-              fontsize=8.5, frameon=False)
+              fontsize=fonts["tick"], frameon=False)
     ax.set_title("Change in skin-tone swap drop relative to no augmentation\n(lower is better)",
-                 fontsize=12.5, color=INK, pad=24)
+                 fontsize=fonts["title"], color=INK, pad=24)
 
     plt.tight_layout()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):
-        fig.savefig(args.out_dir / f"augmentation_radar_delta.{ext}",
-                    dpi=200, facecolor="white")
-    print(f"\nsaved to {args.out_dir}/augmentation_radar_delta.{{pdf,png}}")
+        fig.savefig(args.out_dir / f"{args.out_name}.{ext}",
+                    dpi=200, facecolor="white", bbox_inches="tight")
+    print(f"\nsaved to {args.out_dir}/{args.out_name}.{{pdf,png}}")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ CORE_MODELS: dict[str, tuple[str, str]] = {
     "eva02-l":        ("timm/eva02_large_patch14_448.mim_in22k_ft_in22k", "image"),
     "vjepa2-l":       ("facebook/vjepa2-vitl-fpc64-256",                  "video"),
     "hiera-b":        ("facebook/hiera-base-224-hf",                      "video"),
+    "hiera-l":        ("facebook/hiera-large-224-hf",                     "video"),
 }
 
 GATED_MODELS: dict[str, tuple[str, str]] = {

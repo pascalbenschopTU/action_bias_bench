@@ -91,6 +91,16 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--grayscale_prob", type=float, default=0.0,
                         help="Probability of converting a clip to grayscale (3-channel) during training. "
                              "Independent of --color_jitter; removes chroma entirely rather than perturbing it.")
+    train.add_argument("--planckian_jitter", type=float, default=0.0,
+                        help="Probability of applying a Planckian/white-balance illuminant shift to RGB "
+                             "frames during training. Independent of --color_jitter and --grayscale_prob.")
+    train.add_argument("--planckian_jitter_min_k", type=float, default=3000.0,
+                        help="Lower bound (Kelvin) of the log-uniform sampled illuminant temperature.")
+    train.add_argument("--planckian_jitter_max_k", type=float, default=12000.0,
+                        help="Upper bound (Kelvin) of the log-uniform sampled illuminant temperature.")
+    train.add_argument("--planckian_jitter_reference_k", type=float, default=6504.0,
+                        help="Reference illuminant temperature (Kelvin) the sampled shift is relative to "
+                             "(default 6504K = CIE D65 standard daylight).")
     train.add_argument("--p_hflip", type=float, default=0.0,
                         help="Probability of applying horizontal flip during RGB training.")
     train.add_argument("--mixup_prob", type=float, default=0.0)
@@ -379,6 +389,10 @@ def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDatas
         color_jitter_hue=getattr(args, "color_jitter_hue", 0.1),
         color_jitter_consistent=getattr(args, "color_jitter_consistent", False),
         grayscale_prob=getattr(args, "grayscale_prob", 0.0) if training else 0.0,
+        planckian_jitter_prob=getattr(args, "planckian_jitter", 0.0) if training else 0.0,
+        planckian_jitter_min_k=getattr(args, "planckian_jitter_min_k", 3000.0),
+        planckian_jitter_max_k=getattr(args, "planckian_jitter_max_k", 12000.0),
+        planckian_jitter_reference_k=getattr(args, "planckian_jitter_reference_k", 6504.0),
         p_hflip=getattr(args, "p_hflip", 0.0) if training else 0.0,
     )
 

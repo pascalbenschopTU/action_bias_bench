@@ -591,3 +591,54 @@ def select_flow_mhi_indices(nf_in, nf_out, nm_in, nm_out, rng):
     mhi_sel = _strict_increasing(mhi_sel, nm_in)
 
     return flow_sel, mhi_sel
+
+
+# ---------------------------
+# Color / illuminant augmentation
+# ---------------------------
+
+# Representative sRGB primary wavelengths (nm), used as a 3-band stand-in
+# for full CIE 1931 spectral integration. Not a reproduction of the Zini
+# et al. (2023) "Planckian Jitter" paper's published lookup tables -- this
+# is a from-scratch, transparently approximate white-balance-style
+# illuminant jitter: it evaluates Planck's law for blackbody spectral
+# radiance at these three wavelengths and takes channel ratios relative to
+# a reference illuminant, green-normalized so achromatic content stays
+# roughly equal-luminance and only red/blue shift (matching how a camera's
+# Kelvin/white-balance slider behaves).
+_PLANCKIAN_WAVELENGTHS_M = {"r": 611e-9, "g": 549e-9, "b": 465e-9}
+
+# Exact SI-defined physical constants (2019 redefinition): Planck constant
+# (J*s), speed of light (m/s), Boltzmann constant (J/K).
+_PLANCK_H = 6.62607015e-34
+_PLANCK_C = 2.99792458e8
+_PLANCK_K_B = 1.380649e-23
+
+# CIE D65 standard daylight illuminant's correlated color temperature.
+PLANCKIAN_DEFAULT_REFERENCE_K = 6504.0
+
+
+def _planck_radiance(wavelength_m: float, temperature_k: float) -> float:
+    exponent = (_PLANCK_H * _PLANCK_C) / (wavelength_m * _PLANCK_K_B * temperature_k)
+    return (2.0 * _PLANCK_H * _PLANCK_C**2) / (wavelength_m**5 * (math.exp(exponent) - 1.0))
+
+
+def planckian_gains(
+    temperature_k: float, reference_k: float = PLANCKIAN_DEFAULT_REFERENCE_K
+) -> Tuple[float, float, float]:
+    """Per-channel (r, g, b) multiplicative gain approximating the color
+    shift of a `temperature_k` blackbody illuminant relative to
+    `reference_k`. Green-normalized (gain_g == 1.0)."""
+    raw = {
+        channel: _planck_radiance(wavelength_m, temperature_k) / _planck_radiance(wavelength_m, reference_k)
+        for channel, wavelength_m in _PLANCKIAN_WAVELENGTHS_M.items()
+    }
+    return raw["r"] / raw["g"], 1.0, raw["b"] / raw["g"]
+
+
+def sample_log_uniform_temperature(rng: np.random.Generator, min_k: float, max_k: float) -> float:
+    """Sample a color temperature log-uniformly in [min_k, max_k] -- equal
+    ratios (e.g. 3000K:6000K vs 6000K:12000K) are equally likely, matching
+    how color-temperature differences are perceived."""
+    log_min, log_max = math.log(min_k), math.log(max_k)
+    return float(math.exp(rng.uniform(log_min, log_max)))

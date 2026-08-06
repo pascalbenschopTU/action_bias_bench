@@ -1,0 +1,76 @@
+% Supplementary section: real-video observational audit on PA-HMDB51.
+% Drop into the supplementary after the zero-shot section. Numbers from cluster
+% jobs 271567 (25-class screen) and 271696 (dribble study); analysis scripts:
+% ActionBiasBench/scripts/eval_pahmdb51_zero_shot.py and eval_dribble_scaffold.py.
+% Add to the bibliography: Wu et al., "Privacy-Preserving Deep Action Recognition:
+% An Adversarial Learning Framework and A New Dataset", IEEE TPAMI 2022 -> \cite{pahmdb51}.
+
+\section{Real-Video Observational Audit on PA-HMDB51}
+\label{sec:supp_pahmdb51}
+
+The main paper argues that observational audits of recorded video generally
+cannot determine which visual factor caused a performance difference. Here we
+run exactly such an audit and show this failure mode concretely on real data.
+We evaluate the same six Kinetics-400-pretrained backbones from
+\cref{sec:results} zero-shot, with their original 400-way classification
+heads, on real HMDB51 clips carrying per-video skin-tone annotations from
+PA-HMDB51~\cite{pahmdb51}. We keep the 25 HMDB51 classes with an unambiguous
+Kinetics-400 counterpart (e.g., \textit{dribble}~$\rightarrow$~\textit{dribbling
+basketball}; the four sword-related classes are pooled onto \textit{sword
+fighting}), yielding 242 annotated clips. Pooling all classes and models, the
+accuracy gap between clips labeled \textit{white} and all other skin-tone
+labels is small and not significant ($0.79$ vs.\ $0.74$ restricted to the 25
+mapped labels; Fisher exact $p=0.058$, and this value is optimistic since it
+treats the six models' predictions on the same clip as independent). The
+skin-tone label is also strongly confounded with the action class itself:
+several classes are annotated almost exclusively white, whereas
+\textit{dribble} contains no white-labeled clips at all, so pooled gaps
+conflate class difficulty with skin tone.
+
+To increase power where the demographic contrast is largest, we annotated the
+skin tone of all 145 \textit{dribble} clips in HMDB51 (the original PA-HMDB51
+covers six): 75 white, 39 black, 30 mixed, 1 unidentifiable. A naive
+clip-level comparison produces an apparently decisive result: white-labeled
+clips are recognized far more accurately than the rest, with
+$p\approx8\times10^{-8}$ (\cref{tab:pahmdb51_dribble}). However, HMDB51 cuts
+multiple clips from the same source video, and the 145 dribble clips originate
+from only 29 source videos, each with a single performer, court, and camera
+setup; skin tone is constant within every source. Treating the source video as
+the unit of analysis --- the actually independent sample --- the same
+comparison collapses to chance ($p=0.49$; 16 white vs.\ 7 black sources), and
+the residual descriptive gap is partly driven by two atypical movie-sourced
+clips (one in each group), not by tone.
+
+\begin{table}[t]
+\centering
+\caption{Zero-shot accuracy on the 145 real HMDB51 \textit{dribble} clips by
+annotated skin tone, pooled over the six Kinetics-400 backbones. \emph{Exact}
+scores a prediction correct only for \textit{dribbling basketball};
+\emph{family} accepts any of the four K400 basketball classes. The clip-level
+test treats each (clip, model) pair as independent although the clips stem
+from only 29 source videos; the source-level test uses one accuracy value per
+source video (Mann--Whitney $U$, white vs.\ black sources). The
+``significant'' clip-level disparity disappears once performer/background
+pseudo-replication is removed.}
+\label{tab:pahmdb51_dribble}
+\begin{tabular}{llccc}
+\toprule
+Unit of analysis & Metric & White & Non-white & $p$ \\
+\midrule
+Clip $\times$ model ($n{=}450$ vs.\ $414$) & exact  & $0.82$ & $0.66$ & $8.1\times10^{-8}$ \\
+Clip $\times$ model ($n{=}450$ vs.\ $414$) & family & $0.96$ & $0.88$ & $1.9\times10^{-5}$ \\
+Source video ($n{=}16$ vs.\ $7$)           & exact  & $0.67$ & $0.61$ & $0.49$ \\
+Source video ($n{=}16$ vs.\ $7$)           & family & $0.91$ & $0.77$ & $0.23$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We emphasize what this does and does not show. It does not demonstrate the
+absence of skin-tone bias on real video: with only seven independent
+black-performer sources, even a double-digit accuracy gap would remain
+undetectable. What it does demonstrate is that a real-video audit of typical
+benchmark size can manufacture a highly ``significant'' skin-tone disparity
+that is, in fact, performer- and background-driven pseudo-replication. This is
+precisely the confounding that recorded data cannot resolve and that motivates
+the controlled counterfactual design of the main paper, where the same motion,
+scene, and camera are held fixed while only skin tone changes.

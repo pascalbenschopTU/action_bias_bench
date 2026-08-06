@@ -11,6 +11,7 @@ import torchvision.transforms.functional as TF
 from decord import VideoReader, cpu
 from torch.utils.data import Dataset
 
+from data.augment import planckian_gains, sample_log_uniform_temperature
 from utils.manifests import classnames_from_id_csv, list_videos
 
 warnings.filterwarnings(
@@ -149,6 +150,10 @@ class RGBVideoClipDataset(Dataset):
         color_jitter_hue: float = 0.1,
         color_jitter_consistent: bool = False,
         grayscale_prob: float = 0.0,
+        planckian_jitter_prob: float = 0.0,
+        planckian_jitter_min_k: float = 3000.0,
+        planckian_jitter_max_k: float = 12000.0,
+        planckian_jitter_reference_k: float = 6504.0,
         p_hflip: float = 0.0,
         blur_mode: str = "none",
         blur_kernel_size: int = 31,
@@ -200,6 +205,10 @@ class RGBVideoClipDataset(Dataset):
         self._grayscale = (
             T.Grayscale(num_output_channels=3) if self._grayscale_prob > 0 else None
         )
+        self._planckian_jitter_prob = float(planckian_jitter_prob)
+        self._planckian_jitter_min_k = float(planckian_jitter_min_k)
+        self._planckian_jitter_max_k = float(planckian_jitter_max_k)
+        self._planckian_jitter_reference_k = float(planckian_jitter_reference_k)
         self._blur_mode = str(blur_mode).lower()
         self._blur_kernel_size = int(blur_kernel_size)
         self._blur_sigma = float(blur_sigma)
@@ -252,6 +261,14 @@ class RGBVideoClipDataset(Dataset):
                     frame = TF.adjust_hue(frame, h)
             rgb[:, t_idx] = frame
 
+    def _apply_planckian_jitter(self, rgb: torch.Tensor, gains: tuple[float, float, float]) -> None:
+        """Apply a fixed (r,g,b) multiplicative gain to every frame of a clip, in place."""
+        gain_tensor = torch.tensor(gains, dtype=torch.float32).view(3, 1, 1)
+        for t_idx in range(rgb.shape[1]):
+            frame = rgb[:, t_idx].to(torch.float32)
+            frame = (frame * gain_tensor).clamp_(0, 255)
+            rgb[:, t_idx] = frame.to(torch.uint8)
+
     def _load_item(self, idx: int, *, sample_offset: int = 0):
         path = self.paths[idx]
         label = self.labels[idx]
@@ -290,6 +307,12 @@ class RGBVideoClipDataset(Dataset):
             if self._grayscale is not None and rng.random() < self._grayscale_prob:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._grayscale(rgb[:, t_idx])
+            if self._planckian_jitter_prob > 0 and rng.random() < self._planckian_jitter_prob:
+                temperature_k = sample_log_uniform_temperature(
+                    rng, self._planckian_jitter_min_k, self._planckian_jitter_max_k
+                )
+                gains = planckian_gains(temperature_k, self._planckian_jitter_reference_k)
+                self._apply_planckian_jitter(rgb, gains)
             if self._p_hflip > 0 and rng.random() < self._p_hflip:
                 rgb = torch.flip(rgb, dims=(-1,))
             if self._blur is not None:

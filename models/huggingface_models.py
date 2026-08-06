@@ -154,6 +154,18 @@ def encode_hiera(frames_bgr: np.ndarray, model, processor, device=DEVICE) -> np.
     return F.normalize(emb, dim=-1).cpu().float().numpy()
 
 
+def load_hiera_large():
+    """Same MAE-pretrained recipe as load_hiera, larger capacity (~213M vs ~51M params)."""
+    from transformers import AutoModel, AutoProcessor
+    path = str(HF_ROOT / "facebook__hiera-large-224-hf")
+    processor = AutoProcessor.from_pretrained(path)
+    model = AutoModel.from_pretrained(path).eval().to(DEVICE)
+    return model, processor
+
+
+encode_hiera_large = encode_hiera  # identical pooling logic, hidden_size is read from the model
+
+
 # ── V-JEPA 2 (video model) ────────────────────────────────────────────────────
 # Tubelet size = 2, so T frames -> T//2 temporal tokens after spatial pooling.
 # e.g. 64 frames -> 32 temporal vectors, each summarising a 2-frame window.

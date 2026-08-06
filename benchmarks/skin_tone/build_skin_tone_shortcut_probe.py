@@ -58,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--val_max_samples_per_class", type=int, default=6)
     parser.add_argument("--eval_max_samples_per_class", type=int, default=0)
+    parser.add_argument(
+        "--dataset_subdir",
+        type=str,
+        default="",
+        help=(
+            "Optional generated-manifest subdirectory. If omitted, the historical "
+            "skin_tone_camera_far_binary[_mix...] naming is used."
+        ),
+    )
     parser.add_argument("--mix_pct", type=int, default=0,
                         help="Percentage of opposite-skin-tone samples to mix into each class for training (0=pure, 10=10%% minority).")
     parser.add_argument("--mix_seed", type=int, default=0,
@@ -265,9 +274,11 @@ def main() -> None:
     if mix_pct < 0 or mix_pct > 50:
         raise ValueError(f"--mix_pct must be between 0 and 50, got {mix_pct}")
 
-    dataset_subdir = "skin_tone_camera_far_binary"
-    if mix_pct > 0:
-        dataset_subdir = f"skin_tone_camera_far_binary_mix{mix_pct}_seed{mix_seed}"
+    dataset_subdir = str(args.dataset_subdir).strip()
+    if not dataset_subdir:
+        dataset_subdir = "skin_tone_camera_far_binary"
+        if mix_pct > 0:
+            dataset_subdir = f"skin_tone_camera_far_binary_mix{mix_pct}_seed{mix_seed}"
 
     manifest_root = MANIFESTS_ROOT / dataset_subdir / args.pair_tag
     label_csv = LABELS_ROOT / dataset_subdir / f"{args.pair_tag}_labels.csv"
@@ -349,6 +360,7 @@ def main() -> None:
         "train_max_samples_per_class": train_max_samples_per_class,
         "val_max_samples_per_class": val_max_samples_per_class,
         "eval_max_samples_per_class": eval_max_samples_per_class,
+        "dataset_subdir": dataset_subdir,
         "mix_pct": mix_pct,
         "mix_seed": mix_seed,
         "label_csv": str(label_csv),

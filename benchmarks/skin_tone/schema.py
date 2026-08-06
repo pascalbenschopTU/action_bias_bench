@@ -38,10 +38,30 @@ SWAP_ORDER = (
     ("white", "african"),
 )
 SWAP_LABELS = (
-    "african\n→ white",
-    "indian\n→ asian",
-    "asian\n→ indian",
-    "white\n→ african",
+    "African\n→ white",
+    "Indian\n→ Asian",
+    "Asian\n→ Indian",
+    "white\n→ African",
+)
+
+# The 4 undirected color pairs achievable by swapping across the dark/light
+# tone-group boundary (african, indian = dark; white, asian = light). Same-
+# group pairs (african<->indian, white<->asian) never occur -- matched and
+# shifted always cross the group boundary by construction of the shortcut
+# probe. Each entry's two directions (e.g. african->white and white->african)
+# are pooled into one cluster-level statistic per color pair; see
+# compute_variant_pair_cluster_significance_rows.
+COLOR_PAIR_ORDER = (
+    "african<->white",
+    "indian<->white",
+    "african<->asian",
+    "indian<->asian",
+)
+COLOR_PAIR_LABELS = (
+    "African ↔ white",
+    "Indian ↔ white",
+    "African ↔ Asian",
+    "Indian ↔ Asian",
 )
 
 RGB_MODEL_COLORS = {

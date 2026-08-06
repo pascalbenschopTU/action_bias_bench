@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -11,6 +12,10 @@ try:
     from .schema import RGB_MODEL_COLORS
 except ImportError:  # pragma: no cover - direct script execution
     from schema import RGB_MODEL_COLORS
+try:
+    from .analyze_skin_tone_swap_influence import load_prediction_rows, build_pair_rows
+except ImportError:  # pragma: no cover - direct script execution
+    from analyze_skin_tone_swap_influence import load_prediction_rows, build_pair_rows
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,7 +277,7 @@ def write_plot(root: Path, rows: List[Dict[str, object]], metric_name: str) -> L
     fig, axes = plt.subplots(1, 2, figsize=(14, 6.2), dpi=180)
     panel_specs = [
         {
-            "title": "Train-ID split (seen identities)",
+            "title": "Train-ID split (seen IDs)",
             "x_key": f"{metric_name}_drop_training_videos_mean",
             "x_std_key": f"{metric_name}_drop_training_videos_std",
             "y_key": f"{metric_name}_shifted_seen_ids_mean",
@@ -281,7 +286,7 @@ def write_plot(root: Path, rows: List[Dict[str, object]], metric_name: str) -> L
             "y_label": f"Shifted F1 macro  (higher is better)",
         },
         {
-            "title": "Test-ID split (unseen identities)",
+            "title": "Test-ID split (held-out IDs)",
             "x_key": f"{metric_name}_drop_testing_videos_mean",
             "x_std_key": f"{metric_name}_drop_testing_videos_std",
             "y_key": f"{metric_name}_shifted_unseen_ids_mean",
@@ -512,13 +517,322 @@ def write_pair_heatmap(root: Path, rows: List[Dict[str, object]], metric_name: s
 
     if last_im is not None:
         cbar = fig.colorbar(last_im, cax=cax)
-        cbar.set_label("Matched minus shifted F1 (higher = more skin-tone sensitivity)", fontsize=10)
+        cbar.set_label("Matched $-$ shifted F1", fontsize=10)
     fig.suptitle("Skin-tone shortcut sensitivity is pair- and architecture-dependent", fontsize=15, weight="bold", y=0.995)
     fig.subplots_adjust(top=0.88, left=0.12, right=0.94, bottom=0.08)
 
     png_path = root / f"skin_tone_pair_heatmap_{metric_name}.png"
     pdf_path = root / f"skin_tone_pair_heatmap_{metric_name}.pdf"
     svg_path = root / f"skin_tone_pair_heatmap_{metric_name}.svg"
+    fig.savefig(png_path, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+    return [png_path, pdf_path, svg_path]
+
+
+def write_pair_heatmap_test_only(root: Path, rows: List[Dict[str, object]], metric_name: str) -> List[Path]:
+    """Single-panel heatmap of the held-out (test) split swap effect on F1."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.colors as mcolors
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:
+        print(f"[WARN] Could not import matplotlib; skipping test-only pair heatmap: {exc}", flush=True)
+        return []
+
+    if not rows:
+        return []
+
+    modalities = sorted({str(row["modality"]) for row in rows}, key=modality_sort_key)
+    pair_tags = sorted({str(row["pair_tag"]) for row in rows}, key=pair_sort_key)
+
+    value_key = f"{metric_name}_drop_testing_videos_mean"
+    matrix = np.array(_matrix_from_rows(rows, pair_tags, modalities, value_key), dtype=float)
+
+    finite = [v for line in matrix for v in line if v == v]
+    max_abs = max((abs(v) for v in finite), default=0.05)
+    max_abs = max(max_abs, 0.05)
+    norm = mcolors.TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
+
+    fig = plt.figure(figsize=(max(10.5, len(pair_tags) * 1.0), 4.6), dpi=200)
+    grid = fig.add_gridspec(1, 2, width_ratios=[40, 1.4], wspace=0.12)
+    ax = fig.add_subplot(grid[0, 0])
+    cax = fig.add_subplot(grid[0, 1])
+
+    im = ax.imshow(matrix, cmap="coolwarm", norm=norm, aspect="auto")
+    ax.set_xticks(range(len(pair_tags)))
+    ax.set_xticklabels([pretty_pair_label(pair_tag, multiline=True) for pair_tag in pair_tags], fontsize=9)
+    ax.set_yticks(range(len(modalities)))
+    ax.set_yticklabels([display_name(modality) for modality in modalities], fontsize=10)
+    ax.set_xlabel("Action pair", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Model", fontsize=10, fontweight="bold")
+    for row_idx in range(matrix.shape[0]):
+        for col_idx in range(matrix.shape[1]):
+            value = matrix[row_idx, col_idx]
+            if not (value == value):
+                continue
+            text_color = "#111111" if abs(value) < max_abs * 0.45 else "white"
+            ax.text(col_idx, row_idx, f"{value:.03f}", ha="center", va="center", fontsize=7.5, color=text_color)
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Matched $-$ shifted F1", fontsize=10)
+    ax.set_title("Skin-tone swap effect on F1", fontsize=15, weight="bold", pad=12)
+    fig.subplots_adjust(top=0.86, left=0.12, right=0.94, bottom=0.16)
+
+    png_path = root / f"skin_tone_pair_heatmap_{metric_name}_testonly.png"
+    pdf_path = root / f"skin_tone_pair_heatmap_{metric_name}_testonly.pdf"
+    svg_path = root / f"skin_tone_pair_heatmap_{metric_name}_testonly.svg"
+    fig.savefig(png_path, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+    return [png_path, pdf_path, svg_path]
+
+
+def _paired_flip_display_name(model: str) -> str:
+    return "I3D_flow" if model == "i3d_flow" else model
+
+
+def _paired_flip_sort_key(model: str) -> tuple[int, str]:
+    return (0, model) if model == "i3d_flow" else (1, model)
+
+
+def write_pair_heatmap_paired_flip_rate(root: Path) -> List[Path]:
+    """Single-panel heatmap of the held-out (test) split swap effect, computed
+    from paired clip-level correctness rather than from separately-averaged
+    split F1 scores.
+
+    ``write_pair_heatmap_test_only`` compares F1_macro(matched) against
+    F1_macro(shifted) as two independently-averaged splits. Those splits do
+    not weight every performer identity's clips equally (the shifted split
+    draws on the whole opposite tone group, not one specific counterpart), so
+    a single identity misclassified under every skin tone can be weighted
+    differently in each average and produce an apparent gap with no real
+    directional cause. Here each matched clip is instead joined to its
+    specific shifted counterpart (same identity, background, and action),
+    and the plotted value is (b-c)/n over those pairs, exactly the accuracy
+    drop computed on the correctly-paired set: a clip wrong under both tones
+    contributes to neither b nor c.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.colors as mcolors
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:
+        print(f"[WARN] Could not import matplotlib; skipping paired flip-rate heatmap: {exc}", flush=True)
+        return []
+
+    prediction_rows, _csv_paths = load_prediction_rows(root, None)
+    if not prediction_rows:
+        return []
+    joined_rows, _report = build_pair_rows(prediction_rows, ["unseen"])
+    if not joined_rows:
+        return []
+
+    counts: Dict[tuple[str, str], Dict[str, int]] = {}
+    for row in joined_rows:
+        key = (str(row["model"]), str(row["pair_tag"]))
+        item = counts.setdefault(key, {"b": 0, "c": 0, "n": 0})
+        item["n"] += 1
+        matched_correct = int(row["correct_matched"])
+        shifted_correct = int(row["correct_shifted"])
+        if matched_correct == 1 and shifted_correct == 0:
+            item["b"] += 1
+        elif matched_correct == 0 and shifted_correct == 1:
+            item["c"] += 1
+
+    models = sorted({model for model, _pair in counts}, key=_paired_flip_sort_key)
+    pair_tags = sorted({pair for _model, pair in counts}, key=pair_sort_key)
+    if not models or not pair_tags:
+        return []
+
+    matrix = np.full((len(models), len(pair_tags)), np.nan)
+    for i, model in enumerate(models):
+        for j, pair_tag in enumerate(pair_tags):
+            item = counts.get((model, pair_tag))
+            if item is None or item["n"] == 0:
+                continue
+            matrix[i, j] = (item["b"] - item["c"]) / item["n"]
+
+    finite = [v for line in matrix for v in line if v == v]
+    max_abs = max((abs(v) for v in finite), default=0.05)
+    max_abs = max(max_abs, 0.05)
+    norm = mcolors.TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
+
+    fig = plt.figure(figsize=(max(10.5, len(pair_tags) * 1.0), 4.6), dpi=200)
+    grid = fig.add_gridspec(1, 2, width_ratios=[40, 1.4], wspace=0.12)
+    ax = fig.add_subplot(grid[0, 0])
+    cax = fig.add_subplot(grid[0, 1])
+
+    im = ax.imshow(matrix, cmap="coolwarm", norm=norm, aspect="auto")
+    ax.set_xticks(range(len(pair_tags)))
+    ax.set_xticklabels([pretty_pair_label(pair_tag, multiline=True) for pair_tag in pair_tags], fontsize=9)
+    ax.set_yticks(range(len(models)))
+    ax.set_yticklabels([_paired_flip_display_name(model) for model in models], fontsize=10)
+    ax.set_xlabel("Action pair", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Model", fontsize=10, fontweight="bold")
+    for row_idx in range(matrix.shape[0]):
+        for col_idx in range(matrix.shape[1]):
+            value = matrix[row_idx, col_idx]
+            if not (value == value):
+                continue
+            text_color = "#111111" if abs(value) < max_abs * 0.45 else "white"
+            ax.text(col_idx, row_idx, f"{value:.03f}", ha="center", va="center", fontsize=7.5, color=text_color)
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Paired accuracy drop (b-c)/n", fontsize=9)
+    ax.set_title("Paired accuracy drop", fontsize=15, weight="bold", pad=12)
+    fig.subplots_adjust(top=0.86, left=0.12, right=0.94, bottom=0.16)
+
+    png_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.png"
+    pdf_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.pdf"
+    svg_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.svg"
+    fig.savefig(png_path, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+    return [png_path, pdf_path, svg_path]
+
+
+def _compute_raw_accuracy_rows(root: Path) -> List[Dict[str, object]]:
+    """Raw matched/shifted accuracy per (model, action pair, tone-swap direction),
+    pooled over folds and seeds on the held-out ID split. This is the
+    unaggregated backing data for the paired-drop heatmap: plain accuracy in
+    each condition, not F1 and not a derived delta, so it can be checked
+    directly against the summary statistics built on top of it.
+    """
+    prediction_rows, _csv_paths = load_prediction_rows(root, None)
+    if not prediction_rows:
+        return []
+    joined_rows, _report = build_pair_rows(prediction_rows, ["unseen"])
+    if not joined_rows:
+        return []
+
+    counts: Dict[tuple[str, str, str], Dict[str, int]] = {}
+    for row in joined_rows:
+        direction = f"{row['variant_matched']}->{row['variant_shifted']}"
+        key = (str(row["model"]), str(row["pair_tag"]), direction)
+        item = counts.setdefault(key, {"n": 0, "correct_matched": 0, "correct_shifted": 0})
+        item["n"] += 1
+        item["correct_matched"] += int(row["correct_matched"])
+        item["correct_shifted"] += int(row["correct_shifted"])
+
+    rows: List[Dict[str, object]] = []
+    for (model, pair_tag, direction), item in counts.items():
+        n = item["n"]
+        rows.append(
+            {
+                "model": model,
+                "pair_tag": pair_tag,
+                "direction": direction,
+                "n": n,
+                "correct_matched": item["correct_matched"],
+                "correct_shifted": item["correct_shifted"],
+                "acc_matched": item["correct_matched"] / n if n else float("nan"),
+                "acc_shifted": item["correct_shifted"] / n if n else float("nan"),
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            _paired_flip_sort_key(str(r["model"])),
+            pair_sort_key(str(r["pair_tag"])),
+            str(r["direction"]),
+        )
+    )
+    return rows
+
+
+def write_raw_accuracy_csv(root: Path) -> List[Path]:
+    rows = _compute_raw_accuracy_rows(root)
+    if not rows:
+        return []
+    out_path = root / "skin_tone_raw_accuracy_by_direction_testonly.csv"
+    fieldnames = ["model", "pair_tag", "direction", "n", "correct_matched", "correct_shifted", "acc_matched", "acc_shifted"]
+    with out_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return [out_path]
+
+
+def write_raw_accuracy_plot(root: Path) -> List[Path]:
+    """Grouped bar chart of raw matched vs. shifted accuracy per action pair,
+    one panel per model, pooled over tone-swap direction within each pair.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:
+        print(f"[WARN] Could not import matplotlib; skipping raw accuracy plot: {exc}", flush=True)
+        return []
+
+    direction_rows = _compute_raw_accuracy_rows(root)
+    if not direction_rows:
+        return []
+
+    pooled: Dict[tuple[str, str], Dict[str, int]] = {}
+    for row in direction_rows:
+        key = (str(row["model"]), str(row["pair_tag"]))
+        item = pooled.setdefault(key, {"n": 0, "correct_matched": 0, "correct_shifted": 0})
+        item["n"] += int(row["n"])
+        item["correct_matched"] += int(row["correct_matched"])
+        item["correct_shifted"] += int(row["correct_shifted"])
+
+    models = sorted({model for model, _pair in pooled}, key=_paired_flip_sort_key)
+    pair_tags = sorted({pair for _model, pair in pooled}, key=pair_sort_key)
+    if not models or not pair_tags:
+        return []
+
+    n_cols = 2
+    n_rows = math.ceil(len(models) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.6 * n_cols, 3.4 * n_rows), dpi=180, squeeze=False)
+
+    x = np.arange(len(pair_tags))
+    width = 0.36
+
+    for idx, model in enumerate(models):
+        ax = axes[idx // n_cols][idx % n_cols]
+        matched_vals = []
+        shifted_vals = []
+        for pair_tag in pair_tags:
+            item = pooled.get((model, pair_tag))
+            if item is None or item["n"] == 0:
+                matched_vals.append(float("nan"))
+                shifted_vals.append(float("nan"))
+                continue
+            matched_vals.append(item["correct_matched"] / item["n"])
+            shifted_vals.append(item["correct_shifted"] / item["n"])
+
+        ax.bar(x - width / 2, matched_vals, width, label="Matched", color="#4c72b0")
+        ax.bar(x + width / 2, shifted_vals, width, label="Shifted", color="#dd8452")
+        ax.set_xticks(x)
+        ax.set_xticklabels([pretty_pair_label(pair_tag) for pair_tag in pair_tags], fontsize=7.5, rotation=35, ha="right")
+        ax.set_ylim(0.0, 1.05)
+        ax.set_title(_paired_flip_display_name(model), fontsize=11, weight="bold")
+        ax.set_ylabel("Accuracy", fontsize=9)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    for idx in range(len(models), n_rows * n_cols):
+        axes[idx // n_cols][idx % n_cols].axis("off")
+
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=10, frameon=True, bbox_to_anchor=(0.5, 0.0))
+    fig.suptitle("Raw matched vs. shifted accuracy per action pair (held-out IDs)", fontsize=14, weight="bold", y=1.0)
+    fig.tight_layout(rect=(0, 0.05, 1, 0.96))
+
+    png_path = root / "skin_tone_raw_accuracy_by_pair_testonly.png"
+    pdf_path = root / "skin_tone_raw_accuracy_by_pair_testonly.pdf"
+    svg_path = root / "skin_tone_raw_accuracy_by_pair_testonly.svg"
     fig.savefig(png_path, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     fig.savefig(svg_path, bbox_inches="tight")
@@ -544,6 +858,14 @@ def main() -> None:
     for plot_path in write_plot(args.root, summary_rows, args.metric):
         print(plot_path)
     for plot_path in write_pair_heatmap(args.root, pair_rows, args.metric):
+        print(plot_path)
+    for plot_path in write_pair_heatmap_test_only(args.root, pair_rows, args.metric):
+        print(plot_path)
+    for plot_path in write_pair_heatmap_paired_flip_rate(args.root):
+        print(plot_path)
+    for plot_path in write_raw_accuracy_csv(args.root):
+        print(plot_path)
+    for plot_path in write_raw_accuracy_plot(args.root):
         print(plot_path)
 
 

@@ -60,7 +60,7 @@ ALL_VARIANTS   = LIGHT_VARIANTS + DARK_VARIANTS
 BACKGROUNDS = ["autumn_hockey", "konzerthaus", "stadium_01"]
 ALL_IDS     = list(range(10))
 
-MODELS = ["clip", "dinov2", "dinov3", "siglip", "eva02", "hiera", "vjepa2", "tc_clip"]
+MODELS = ["clip", "dinov2", "dinov3", "siglip", "eva02", "hiera", "hiera_large", "vjepa2", "tc_clip"]
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

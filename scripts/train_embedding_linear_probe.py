@@ -63,8 +63,19 @@ EVAL_SPLITS = [
     "eval_shifted_unseen_ids",
 ]
 
-MANIFESTS_ROOT = ROOT / "benchmarks/skin_tone/generated/manifests/skin_tone_camera_far_binary"
+MANIFESTS_BASE = ROOT / "benchmarks/skin_tone/generated/manifests"
 LABELS_ROOT    = ROOT / "benchmarks/skin_tone/generated/labels/skin_tone_camera_far_binary"
+
+
+def manifests_root_for_fold(fold: int | None) -> Path:
+    """fold=None uses the original fixed-split manifests (6 train / 4 held-out
+    identities, never rotated). fold=0/1/2 reuses the CV manifests already
+    built by run_action_bias_bench.sh under SKIN_TONE_SPLIT_MODE=cv -- these
+    are keyed only by (pair, fold), not by modality or seed, so the linear
+    probe can read them directly without regenerating anything."""
+    if fold is None:
+        return MANIFESTS_BASE / "skin_tone_camera_far_binary"
+    return MANIFESTS_BASE / f"skin_tone_camera_far_binary_fold{fold}"
 
 _VARIANT_RE = re.compile(r"_modified_([^/_]+?)(?:\.mp4|\.avi|$)", re.IGNORECASE)
 _BASE_ID_RE = re.compile(
@@ -306,6 +317,11 @@ def parse_args() -> argparse.Namespace:
                     help="Output root. Defaults to out/skin_tone_probe_{model}_linear.")
     ap.add_argument("--seeds",       default="0,1,2",
                     help="Comma-separated training seeds.")
+    ap.add_argument("--folds",       default="",
+                    help="Comma-separated CV folds (e.g. 0,1,2), reusing the manifests "
+                         "already built by run_action_bias_bench.sh under "
+                         "SKIN_TONE_SPLIT_MODE=cv. Empty (default) keeps the original "
+                         "fixed 6-train/4-held-out split, matching prior behavior.")
     ap.add_argument("--C",           type=float, default=1.0,
                     help="LogisticRegression regularisation strength.")
     ap.add_argument("--max_iter",    type=int, default=2000)
@@ -327,9 +343,10 @@ def run_probe_for_pair(
     mode_name: str,
     C: float,
     max_iter: int,
+    manifests_root: Path,
     subsample_frames: int = 0,
 ) -> None:
-    train_manifest = MANIFESTS_ROOT / pair_tag / "train_in_domain.txt"
+    train_manifest = manifests_root / pair_tag / "train_in_domain.txt"
     if not train_manifest.exists():
         print(f"  [SKIP] manifest not found: {train_manifest}", flush=True)
         return
@@ -352,7 +369,7 @@ def run_probe_for_pair(
     per_variant_by_split: dict[str, dict] = {}
 
     for split in EVAL_SPLITS:
-        eval_manifest = MANIFESTS_ROOT / pair_tag / f"{split}.txt"
+        eval_manifest = manifests_root / pair_tag / f"{split}.txt"
         if not eval_manifest.exists():
             continue
         X_eval, y_eval, meta_eval = load_embeddings_for_manifest(
@@ -427,28 +444,34 @@ def main() -> None:
 
     print(f"model={model}  mode={mode_name}  cache={cache_dir}  out={out_root}", flush=True)
 
-    pair_tags = sorted(
-        d.name for d in MANIFESTS_ROOT.iterdir()
-        if d.is_dir() and "_vs_" in d.name and not d.name.endswith("_smoke")
-    )
+    folds: list = [int(f.strip()) for f in args.folds.split(",") if f.strip()] if args.folds.strip() else [None]
 
-    for pair_tag in pair_tags:
-        for seed in seeds:
-            out_dir = out_root / "rgb_torchvision" / model_dir_name / pair_tag / f"seed_{seed}"
-            if (out_dir / f"summary_{mode_name}.json").exists():
-                print(f"  [SKIP cached] {pair_tag} seed={seed}", flush=True)
-                continue
-            run_probe_for_pair(
-                pair_tag=pair_tag,
-                seed=seed,
-                cache_dir=cache_dir,
-                model=model,
-                out_dir=out_dir,
-                mode_name=mode_name,
-                C=args.C,
-                max_iter=args.max_iter,
-                subsample_frames=args.subsample_frames,
-            )
+    for fold in folds:
+        manifests_root = manifests_root_for_fold(fold)
+        fold_tag = f"fold{fold}" if fold is not None else ""
+        pair_tags = sorted(
+            d.name for d in manifests_root.iterdir()
+            if d.is_dir() and "_vs_" in d.name and not d.name.endswith("_smoke")
+        )
+
+        for pair_tag in pair_tags:
+            for seed in seeds:
+                out_dir = out_root / "rgb_torchvision" / model_dir_name / pair_tag / f"seed_{seed}{fold_tag}"
+                if (out_dir / f"summary_{mode_name}.json").exists():
+                    print(f"  [SKIP cached] {pair_tag} seed={seed}{fold_tag}", flush=True)
+                    continue
+                run_probe_for_pair(
+                    pair_tag=pair_tag,
+                    seed=seed,
+                    cache_dir=cache_dir,
+                    model=model,
+                    out_dir=out_dir,
+                    mode_name=mode_name,
+                    C=args.C,
+                    max_iter=args.max_iter,
+                    manifests_root=manifests_root,
+                    subsample_frames=args.subsample_frames,
+                )
 
     if args.run_analysis:
         import subprocess
