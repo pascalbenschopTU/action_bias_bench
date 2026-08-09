@@ -8,16 +8,10 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 SKIN_TONE_DATASET_ROOT="${SKIN_TONE_DATASET_ROOT:-}"
-MOTION_ROOT_DIR="${SKIN_TONE_MOTION_ROOT_DIR:-}"
 RGB_ROOT_DIR="${SKIN_TONE_RGB_ROOT_DIR:-$SKIN_TONE_DATASET_ROOT}"
 FLOW_ROOT_DIR="${SKIN_TONE_FLOW_TVL1_ROOT_DIR:-}"
 RGB_TORCHVISION_ROOT_DIR="${SKIN_TONE_RGB_TORCHVISION_ROOT_DIR:-$RGB_ROOT_DIR}"
 OUT_ROOT="${SKIN_TONE_OUT_ROOT:-$ROOT_DIR/out/skin_tone_probe_seeded_v7}"
-
-# auto-detect default checkpoints if they exist
-_findfile() { [[ -f "$1" ]] && echo "$1" || true; }
-MOTION_PRETRAINED_CKPT="${SKIN_TONE_MOTION_PRETRAINED_CKPT:-$(_findfile "$ROOT_DIR/out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_033_loss3.5884.pt")}"
-RGB_PRETRAINED_CKPT="${SKIN_TONE_RGB_PRETRAINED_CKPT:-$(_findfile "$ROOT_DIR/out/rgb_checkpoint_epoch_019_loss0.6533.pt")}"
 
 # ── experiment config ──────────────────────────────────────────────────────────
 BACKGROUNDS="${SKIN_TONE_BACKGROUNDS:-autumn_hockey,konzerthaus,stadium_01}"
@@ -31,9 +25,7 @@ ACTION_PAIRS="${SKIN_TONE_ACTION_PAIRS:-squat:tie,clap:celebrate,dribble:golf,lu
 INCLUDE_REVERSED_PAIRS="${SKIN_TONE_INCLUDE_REVERSED_PAIRS:-1}"
 SEEDS="${SKIN_TONE_SEEDS:-0,1,2}"
 MIX_PCT="${SKIN_TONE_MIX_PCT:-0}"
-MODALITIES="${MODALITIES:-${SKIN_TONE_MODALITIES:-motion,rgb,rgb_torchvision,flow_i3d_external}}"
-HEAD_MODES="${SKIN_TONE_HEAD_MODES:-language}"
-MOTION_PRESET="${SKIN_TONE_MOTION_PRESET:-default}"
+MODALITIES="${MODALITIES:-${SKIN_TONE_MODALITIES:-rgb_torchvision,flow_i3d_external}}"
 RGB_TORCHVISION_MODELS="${SKIN_TONE_RGB_TORCHVISION_MODELS:-r3d_18}"
 COLOR_JITTER="${SKIN_TONE_COLOR_JITTER:-0.8}"
 # ColorJitter strength (defaults reproduce the original augmentation).
@@ -200,7 +192,6 @@ mkdir -p "$OUT_ROOT" "$BENCHMARK_DIR/generated/manifests" "$BENCHMARK_DIR/genera
 
 IFS=',' read -r -a _pairs  <<< "$ACTION_PAIRS"
 IFS=',' read -r -a _seeds  <<< "$SEEDS"
-IFS=',' read -r -a _heads  <<< "$HEAD_MODES"
 IFS=',' read -r -a _mods   <<< "$MODALITIES"
 IFS=',' read -r -a _tvmods <<< "$RGB_TORCHVISION_MODELS"
 if [[ "$SPLIT_MODE" == "cv" ]]; then
@@ -270,89 +261,6 @@ for pair_spec in "${_pairs[@]}"; do
 
       for modality in "${_mods[@]}"; do
         case "$modality" in
-
-        motion)
-          ft_configs=(configs/benchmarks/skin_tone/finetune/common.toml)
-          ev_configs=(configs/benchmarks/skin_tone/eval/common.toml)
-          motion_out="${OUT_ROOT}/motion"
-          active_branch=""
-          if [[ "$MOTION_PRESET" == "x3d_flow_only" ]]; then
-            ft_configs+=(configs/benchmarks/skin_tone/finetune/x3d_flow_only.toml)
-            ev_configs+=(configs/benchmarks/skin_tone/eval/x3d_flow_only.toml)
-            motion_out="${OUT_ROOT}/motion_x3d_flow"
-            active_branch="second"
-          fi
-
-          for head_mode in "${_heads[@]}"; do
-            out_dir="${motion_out}/${pair_tag}/${run_seed_tag}"
-            [[ "$head_mode" != "legacy" ]] && out_dir="${out_dir}_${head_mode}"
-            [[ -f "$out_dir/summary_motion_only.json" ]] && continue
-
-            ft_cmd=("$PYTHON_BIN" finetune.py)
-            for cfg in "${ft_configs[@]}"; do ft_cmd+=(--config "$cfg"); done
-            ft_cmd+=(
-              --root_dir "$MOTION_ROOT_DIR"
-              --manifest "${manifest_root}/train_in_domain.txt"
-              --class_id_to_label_csv "$label_csv"
-              --out_dir "$out_dir"
-              --seed "$seed"
-              --val_subset_seed "$seed"
-              --finetune_head_mode "$head_mode"
-              --pretrained_ckpt "$MOTION_PRETRAINED_CKPT"
-            )
-            "${ft_cmd[@]}"
-
-            ckpt="$(latest_ckpt "$out_dir")"
-            [[ -n "$ckpt" ]] || { echo "No checkpoint in $out_dir/checkpoints" >&2; exit 1; }
-
-            ev_cmd=("$PYTHON_BIN" eval.py)
-            for cfg in "${ev_configs[@]}"; do ev_cmd+=(--config "$cfg"); done
-            ev_cmd+=(
-              --root_dir "$MOTION_ROOT_DIR"
-              --ckpt "$ckpt"
-              --class_id_to_label_csv "$label_csv"
-              --out_dir "$out_dir"
-              --summary_only
-            )
-            [[ -n "$active_branch" ]] && ev_cmd+=(--active_branch "$active_branch")
-            for split in "${EVAL_SPLITS[@]}"; do ev_cmd+=(--manifests "${manifest_root}/${split}.txt"); done
-            "${ev_cmd[@]}"
-          done
-          ;;
-
-        rgb)
-          out_dir="${OUT_ROOT}/rgb/${pair_tag}/${run_seed_tag}"
-          [[ -f "$out_dir/summary_rgb_model.json" ]] && continue
-
-          "$PYTHON_BIN" finetune.py \
-            --config configs/benchmarks/skin_tone/finetune/common.toml \
-            --root_dir "$RGB_ROOT_DIR" \
-            --train_modality rgb \
-            --val_modality rgb \
-            --manifest "${manifest_root}/train_in_domain.txt" \
-            --class_id_to_label_csv "$label_csv" \
-            --out_dir "$out_dir" \
-            --seed "$seed" \
-            --val_subset_seed "$seed" \
-            --color_jitter "$COLOR_JITTER" \
-            --pretrained_ckpt "$RGB_PRETRAINED_CKPT"
-
-          ckpt="$(latest_ckpt "$out_dir")"
-          [[ -n "$ckpt" ]] || { echo "No checkpoint in $out_dir/checkpoints" >&2; exit 1; }
-
-          ev_cmd=(
-            "$PYTHON_BIN" eval.py
-            --config configs/benchmarks/skin_tone/eval/common.toml
-            --root_dir "$RGB_ROOT_DIR"
-            --input_modality rgb
-            --ckpt "$ckpt"
-            --class_id_to_label_csv "$label_csv"
-            --out_dir "$out_dir"
-            --summary_only
-          )
-          for split in "${EVAL_SPLITS[@]}"; do ev_cmd+=(--manifests "${manifest_root}/${split}.txt"); done
-          "${ev_cmd[@]}"
-          ;;
 
         rgb_torchvision|rgb_r2plus1d)
           for rgb_model in "${_tvmods[@]}"; do
