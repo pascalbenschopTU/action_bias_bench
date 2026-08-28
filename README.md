@@ -3,7 +3,102 @@
 Code and reproduction commands for **"Controlled Auditing of Skin-Tone Shortcut
 Sensitivity in Human Action Recognition"**.
 
-`tc_clip` (CLIP ViT-B/16 + temporal context, Kinetics-400 pretrained) is vendored via `models/huggingface_models.py::load_tc_clip/encode_tc_clip`, sourced from `appearance_free_cross_domain_action_recognition/tc-clip`. It needs its own environment (einops, mmcv-full, timm==0.4.12) separate from the other models.
+<p align="center">
+  <img src="assets/readme/tone_pairs_hero.png" width="100%"
+       alt="Three moments of one cartwheel, each rendered with a White and an African skin tone">
+</p>
+<p align="center"><em>Same actor, motion, clothing, background and camera. Only the skin
+tone differs — and for some HAR models that is enough to change the predicted action.</em></p>
+
+Recorded video confounds skin tone with performer, clothing, background and
+recording conditions, so an observational gap cannot tell you whether a model is
+*using* skin tone. This repository builds the controlled counterfactual instead:
+synthetic clips that are byte-identical except for the skin texture, a training
+split in which tone predicts the label perfectly, and a test split in which that
+mapping is swapped.
+
+## Results at a glance
+
+Every number below is produced by the commands in [Experiments](#experiments);
+the figures are copies of that output, checked in under `assets/readme/`.
+
+### The test
+
+<p align="center">
+  <img src="assets/readme/swap_design.png" width="62%"
+       alt="Train: cartwheel is always White and lunge always African. Test: the tones are swapped.">
+</p>
+
+In training each action is only ever seen with one skin tone. At test the
+tone–action mapping is swapped and nothing else changes, so a model that leaned
+on tone has to lose accuracy. An optical-flow I3D, which cannot encode colour at
+all, is the negative control.
+
+**Scale.** 4,380 clips over 20 actions x 3 backgrounds x 7 tones. The audit uses
+10 actions x 10 motion instances x 3 backgrounds x 4 tones = 1,200 clips, and
+302,400 clip-level predictions.
+
+### The shortcut is real but small
+
+<p align="center">
+  <img src="assets/readme/paired_drop_heatmap.png" width="86%"
+       alt="Paired accuracy drop per model and action pair; most cells near zero">
+  <img src="assets/readme/per_model_significance.png" width="86%"
+       alt="Per-backbone paired accuracy drop with 95% cluster-bootstrap intervals">
+</p>
+
+Paired accuracy drop `(b-c)/n` after the swap, where `b` counts clips correct
+under the matched tone and wrong under the shifted one and `c` the reverse. Four
+of six RGB backbones drop significantly, but the largest effect is 1.6 pp:
+
+| Model | Drop (pp) | 95% CI | q |
+|---|---|---|---|
+| I3D-flow *(control)* | 0.28 | [-0.50, 1.03] | 0.54 |
+| R3D-18 | 0.19 | [-0.11, 0.58] | 0.50 |
+| R(2+1)D-18 | 0.53 | [0.17, 0.94] | 0.075 |
+| MViT-v2-S | 0.72 | [0.22, 1.42] | 0.047\* |
+| MC3-18 | 1.31 | [0.47, 2.33] | 0.031\* |
+| S3D | 1.36 | [0.67, 2.14] | 0.023\* |
+| Swin3D-S | 1.64 | [0.64, 2.94] | 0.023\* |
+
+5,000-resample cluster bootstrap over the 10 motion instances, Wilcoxon
+signed-rank, Benjamini-Hochberg corrected. Positive = accuracy lost under the swap.
+
+### Frozen features carry much more tone information
+
+<p align="center">
+  <img src="assets/readme/probe_drop_by_model.png" width="86%"
+       alt="Linear-probe F1 drop under a skin-tone shift, by backbone family">
+</p>
+
+Linear probes on frozen embeddings: CLIP loses 0.43 F1 and SigLIP 0.27 under the
+same tone shift that costs a fine-tuned backbone under two points of accuracy.
+Video-SSL (V-JEPA 2) loses almost nothing. A low matched F1 (MC3-18 at 0.60,
+near chance for a binary task) means that probe never learned the task, so its
+flat bar is not evidence of robustness.
+
+### Colour augmentation is not the fix
+
+<p align="center">
+  <img src="assets/readme/augmentation_radar.png" width="62%"
+       alt="Change in skin-tone swap drop for four augmentation conditions, relative to none">
+</p>
+
+Radius = change in swap drop relative to no augmentation; outside the reference
+circle means the augmentation made that model *more* tone-sensitive. No
+condition — weak jitter, strong jitter, strong jitter + grayscale, or Planckian
+illuminant jitter — helps every model, and none removes the need for curated
+training data.
+
+### What this does not show
+
+The controlled result is a statement about **shortcut sensitivity**, not about
+real-world demographic disparity. On real video the same six pretrained models
+show no significant light- vs. other-tone accuracy gap (HMDB51: 0.67 vs 0.61,
+p = 0.49 over 145 clips; Kinetics-400: 0.95 vs 0.95, p = 0.53 over 806 clips) —
+and on HMDB51 the naive per-clip test *does* look significant (p = 8x10^-8) until
+repeated clips of one performer are treated as a single unit. See
+[Experiment 4](#4-real-world-observational-audit-section-4-pa-hmdb51--kinetics-dribbling).
 
 ## Layout
 
@@ -12,11 +107,17 @@ Sensitivity in Human Action Recognition"**.
 - `scripts/run_action_bias_bench.sh` — central launcher for the fine-tuning benchmark
 - `data/`, `models/`, `utils/` — dataset/augmentation/model-loading library code
 - `third_party/pytorch-i3d/`
+- `poster/` — the ECCV poster (`landscape_poster.tex`), whose figures are built by
+  `scripts/make_landscape_poster_figures.py`; see `llm_reports/landscape_poster.md`
+- `assets/readme/` — the figures embedded above
 
 All commands below are run from this directory (`ActionBiasBench/`) and are plain
 Python — no cluster/SLURM setup required to reproduce a result.
 
 ## Setup
+
+`tc_clip` (CLIP ViT-B/16 + temporal context, Kinetics-400 pretrained) is vendored via `models/huggingface_models.py::load_tc_clip/encode_tc_clip`, sourced from `appearance_free_cross_domain_action_recognition/tc-clip`. It needs its own environment (einops, mmcv-full, timm==0.4.12) separate from the other models.
+
 
 You must supply external dataset/checkpoint locations explicitly. Required:
 

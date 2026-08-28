@@ -44,6 +44,12 @@ def font_sizes(width_in: float) -> dict[str, float]:
         "annotation": _FONT_RATIO_ANNOTATION * width_in,
     }
 
+
+# Poster variants keep the paper figure's data and layout but pin every font
+# larger relative to the canvas, so text stays legible once the figure is
+# scaled into a poster column and read from a distance.
+POSTER_FONT_SCALE = 1.5
+
 # Which ssm_<METRIC>_<model>.csv files to read. "rsa" (1 - correlation between
 # SSM off-diagonals) is scale-invariant and preferred over "frobenius", which
 # is dominated by a few clips with unusually large SSM magnitude (see
@@ -146,49 +152,64 @@ for m, r in probe.items():
 df = pd.DataFrame(rows).sort_values("drop", ascending=True).reset_index(drop=True)
 
 # ── Figure 1: probe drop by model ────────────────────────────────────────────
+def draw_drop_by_model(width_in, height_in, fonts, left_margin, out_base, legend_loc="lower right"):
+    fig, ax = plt.subplots(figsize=(width_in, height_in))
+    bias = -df["drop"]   # positive = robust (only vjepa2), negative = skin-tone sensitive
+    for i, row in df.iterrows():
+        ax.barh(
+            i, -row["drop"],
+            color=FAM_COLOR[row.family],
+            edgecolor="white", linewidth=0.5,
+        )
+        # Run-level 95% CI as a capless hairline whisker at the bar tip (plotted in
+        # shifted-minus-matched space, so the CI on the drop flips sign). Dark
+        # neutral so it stays visible both over the colored bar and on white.
+        lo, hi = row.get("drop_ci_lo", np.nan), row.get("drop_ci_hi", np.nan)
+        if lo == lo and hi == hi:
+            drop = row["drop"]
+            ax.errorbar(
+                -drop, i,
+                xerr=[[hi - drop], [drop - lo]],
+                fmt="none", ecolor="#2b2b2b", elinewidth=1.1,
+                capsize=0, alpha=0.55, zorder=3,
+            )
+    ax.set_yticks(range(len(df)))
+    ax.set_yticklabels(df.model, fontsize=fonts["tick"])
+    ax.set_ylabel("Model", fontsize=fonts["label"], fontweight="bold")
+    ax.tick_params(axis="x", labelsize=fonts["tick"])
+    ax.invert_yaxis()
+    ax.axvline(0, color="black", linewidth=0.8, alpha=0.4)
+    ax.set_xlim(bias.min() - left_margin, bias.max() + 0.25)
+    ax.set_xlabel("shifted $-$ matched  ($\\Delta$F1)", fontsize=fonts["label"])
+    ax.set_title("Effect of a skin-tone shift on linear-probe accuracy", fontsize=fonts["title"])
+    for i, row in df.iterrows():
+        # Place the label just past the outer (more negative) end of the whisker so
+        # it never overlaps the CI; fall back to the bar tip if no CI is present.
+        hi = row.get("drop_ci_hi", np.nan)
+        outer = -(hi if hi == hi else row["drop"])
+        ax.text(outer - 0.008, i, f"matched F1={row.matched:.2f}", va="center", ha="right",
+                fontsize=fonts["annotation"], color="#555")
+    handles = [plt.Rectangle((0, 0), 1, 1, color=FAM_COLOR[f]) for f in FAM_COLOR]
+    ax.legend(handles, list(FAM_COLOR.keys()), fontsize=fonts["tick"], loc=legend_loc)
+    plt.tight_layout()
+    fig.savefig(f"{out_base}.pdf")
+    fig.savefig(f"{out_base}.png", dpi=150)
+    plt.close(fig)
+
+
 fig1_w = 11.5
 f1 = font_sizes(fig1_w)
-fig, ax = plt.subplots(figsize=(fig1_w, 5.8))
-bias = -df["drop"]   # positive = robust (only vjepa2), negative = skin-tone sensitive
-for i, row in df.iterrows():
-    ax.barh(
-        i, -row["drop"],
-        color=FAM_COLOR[row.family],
-        edgecolor="white", linewidth=0.5,
-    )
-    # Run-level 95% CI as a capless hairline whisker at the bar tip (plotted in
-    # shifted-minus-matched space, so the CI on the drop flips sign). Dark
-    # neutral so it stays visible both over the colored bar and on white.
-    lo, hi = row.get("drop_ci_lo", np.nan), row.get("drop_ci_hi", np.nan)
-    if lo == lo and hi == hi:
-        drop = row["drop"]
-        ax.errorbar(
-            -drop, i,
-            xerr=[[hi - drop], [drop - lo]],
-            fmt="none", ecolor="#2b2b2b", elinewidth=1.1,
-            capsize=0, alpha=0.55, zorder=3,
-        )
-ax.set_yticks(range(len(df)))
-ax.set_yticklabels(df.model, fontsize=f1["tick"])
-ax.set_ylabel("Model", fontsize=f1["label"], fontweight="bold")
-ax.tick_params(axis="x", labelsize=f1["tick"])
-ax.invert_yaxis()
-ax.axvline(0, color="black", linewidth=0.8, alpha=0.4)
-ax.set_xlim(bias.min() - 0.22, bias.max() + 0.25)
-ax.set_xlabel("shifted $-$ matched  ($\\Delta$F1)", fontsize=f1["label"])
-ax.set_title("Effect of a skin-tone shift on linear-probe accuracy", fontsize=f1["title"])
-for i, row in df.iterrows():
-    # Place the label just past the outer (more negative) end of the whisker so
-    # it never overlaps the CI; fall back to the bar tip if no CI is present.
-    hi = row.get("drop_ci_hi", np.nan)
-    outer = -(hi if hi == hi else row["drop"])
-    ax.text(outer - 0.008, i, f"matched F1={row.matched:.2f}", va="center", ha="right",
-            fontsize=f1["annotation"], color="#555")
-handles = [plt.Rectangle((0, 0), 1, 1, color=FAM_COLOR[f]) for f in FAM_COLOR]
-ax.legend(handles, list(FAM_COLOR.keys()), fontsize=f1["tick"], loc="lower right")
-plt.tight_layout()
-fig.savefig(f"{OUT_PREFIX}_drop_by_model.pdf")
-fig.savefig(f"{OUT_PREFIX}_drop_by_model.png", dpi=150)
+draw_drop_by_model(fig1_w, 5.8, f1, 0.22, f"{OUT_PREFIX}_drop_by_model")
+# Taller canvas and a wider left margin give the enlarged tick labels and
+# "matched F1=" annotations room. The enlarged legend no longer fits bottom-right
+# without covering the longest bars, so it moves to the empty upper-left wedge
+# left by sorting the bars ascending.
+draw_drop_by_model(
+    fig1_w, 7.0,
+    {k: v * POSTER_FONT_SCALE for k, v in f1.items()},
+    0.30, f"{OUT_PREFIX}_drop_by_model_poster",
+    legend_loc="upper left",
+)
 
 # ── Figure 2: probe drop vs SSM ratio ────────────────────────────────────────
 # Font sizes are pinned to the 8.6in ratio (matching the other figures) but

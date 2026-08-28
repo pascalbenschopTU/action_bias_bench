@@ -666,39 +666,53 @@ def write_pair_heatmap_paired_flip_rate(root: Path) -> List[Path]:
     max_abs = max(max_abs, 0.05)
     norm = mcolors.TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
 
-    fig = plt.figure(figsize=(max(10.5, len(pair_tags) * 1.0), 4.6), dpi=200)
-    grid = fig.add_gridspec(1, 2, width_ratios=[40, 1.4], wspace=0.12)
-    ax = fig.add_subplot(grid[0, 0])
-    cax = fig.add_subplot(grid[0, 1])
+    def draw(figsize, fonts, stem, formats) -> List[Path]:
+        fig = plt.figure(figsize=figsize, dpi=200)
+        grid = fig.add_gridspec(1, 2, width_ratios=[40, 1.4], wspace=0.12)
+        ax = fig.add_subplot(grid[0, 0])
+        cax = fig.add_subplot(grid[0, 1])
 
-    im = ax.imshow(matrix, cmap="coolwarm", norm=norm, aspect="auto")
-    ax.set_xticks(range(len(pair_tags)))
-    ax.set_xticklabels([pretty_pair_label(pair_tag, multiline=True) for pair_tag in pair_tags], fontsize=9)
-    ax.set_yticks(range(len(models)))
-    ax.set_yticklabels([_paired_flip_display_name(model) for model in models], fontsize=10)
-    ax.set_xlabel("Action pair", fontsize=10, fontweight="bold")
-    ax.set_ylabel("Model", fontsize=10, fontweight="bold")
-    for row_idx in range(matrix.shape[0]):
-        for col_idx in range(matrix.shape[1]):
-            value = matrix[row_idx, col_idx]
-            if not (value == value):
-                continue
-            text_color = "#111111" if abs(value) < max_abs * 0.45 else "white"
-            ax.text(col_idx, row_idx, f"{value:.03f}", ha="center", va="center", fontsize=7.5, color=text_color)
+        im = ax.imshow(matrix, cmap="coolwarm", norm=norm, aspect="auto")
+        ax.set_xticks(range(len(pair_tags)))
+        ax.set_xticklabels([pretty_pair_label(pair_tag, multiline=True) for pair_tag in pair_tags],
+                           fontsize=fonts["xtick"])
+        ax.set_yticks(range(len(models)))
+        ax.set_yticklabels([_paired_flip_display_name(model) for model in models], fontsize=fonts["ytick"])
+        ax.set_xlabel("Action pair", fontsize=fonts["label"], fontweight="bold")
+        ax.set_ylabel("Model", fontsize=fonts["label"], fontweight="bold")
+        for row_idx in range(matrix.shape[0]):
+            for col_idx in range(matrix.shape[1]):
+                value = matrix[row_idx, col_idx]
+                if not (value == value):
+                    continue
+                text_color = "#111111" if abs(value) < max_abs * 0.45 else "white"
+                ax.text(col_idx, row_idx, f"{value:.03f}", ha="center", va="center",
+                        fontsize=fonts["cell"], color=text_color)
 
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.set_label("Paired accuracy drop (b-c)/n", fontsize=9)
-    ax.set_title("Paired accuracy drop", fontsize=15, weight="bold", pad=12)
-    fig.subplots_adjust(top=0.86, left=0.12, right=0.94, bottom=0.16)
+        cbar = fig.colorbar(im, cax=cax)
+        cbar.set_label("Paired accuracy drop (b-c)/n", fontsize=fonts["cbar"])
+        cbar.ax.tick_params(labelsize=fonts["ytick"])
+        ax.set_title("Paired accuracy drop", fontsize=fonts["title"], weight="bold", pad=12)
+        fig.subplots_adjust(top=0.86, left=0.12, right=0.94, bottom=0.16)
 
-    png_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.png"
-    pdf_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.pdf"
-    svg_path = root / "skin_tone_pair_heatmap_paired_flip_rate_testonly.svg"
-    fig.savefig(png_path, bbox_inches="tight")
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(svg_path, bbox_inches="tight")
-    plt.close(fig)
-    return [png_path, pdf_path, svg_path]
+        paths = [root / f"{stem}.{ext}" for ext in formats]
+        for path in paths:
+            fig.savefig(path, bbox_inches="tight")
+        plt.close(fig)
+        return paths
+
+    stem = "skin_tone_pair_heatmap_paired_flip_rate_testonly"
+    paper_fonts = {"xtick": 9, "ytick": 10, "label": 10, "cell": 7.5, "title": 15, "cbar": 9}
+    paths = draw((max(10.5, len(pair_tags) * 1.0), 4.6), paper_fonts, stem, ("png", "pdf", "svg"))
+
+    # Poster variant: same data and layout, every font pinned larger relative to
+    # the canvas so the cell values and tick labels stay legible once the figure
+    # is scaled into a poster column. The canvas is widened and heightened just
+    # enough that the enlarged labels do not collide.
+    poster_fonts = {"xtick": 14, "ytick": 16, "label": 16, "cell": 12, "title": 22, "cbar": 15}
+    paths += draw((max(12.0, len(pair_tags) * 1.15), 5.8), poster_fonts,
+                  f"{stem}_poster", ("png", "pdf"))
+    return paths
 
 
 def _compute_raw_accuracy_rows(root: Path) -> List[Dict[str, object]]:
